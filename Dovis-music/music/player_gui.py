@@ -2,14 +2,17 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 from PIL import Image, ImageTk, ImageDraw, ImageFont, ImageFilter
-import io
+import io,os
 import requests
+import json
 from music_api import MusicAPI
 from audio_player import AudioPlayer
 from lyrics_manager import LyricsManager
 from album_lyrics_panel import AlbumLyricsPanel
+from left_panel import LeftPanel
 from config import THEMES, THEME_NAMES, DEFAULT_THEME, MUSIC_SOURCES, QUALITY_OPTIONS, PLAY_MODES
 from circular_button import CircularButton
+#8888888888888888888888888888888
 
 
 class ThemeManager:
@@ -50,6 +53,7 @@ class MusicPlayerGUI:
         self.current_playlist_item = None  # 当前播放的播放列表项ID
         self.current_playlist_index = -1  # 当前播放的播放列表索引
         self._playback_finished_triggered = False
+        self.search_count_var = tk.StringVar(value="50")   # 默认搜索50首
 
         self.current_lyric_var = None  # 会在create_control_bar中初始化
         self.current_lyric_label = None
@@ -73,6 +77,14 @@ class MusicPlayerGUI:
         self.playlist = []
         self.current_index = 0
 
+        # 添加收藏功能相关变量
+        self.favorites_file = "favorites.json"
+        self.favorites = self.load_favorites()
+
+        # 搜索结果框架引用
+        self.search_results_frame = None
+        self.search_results_visible = False
+
         # 设置播放器回调
         self.player.update_callback = self.on_position_update
 
@@ -83,6 +95,120 @@ class MusicPlayerGUI:
         # 初始化完成后自动搜索热门歌曲
         self.root.after(1000, self.auto_search_hot_songs)
 
+    def clear_favorites(self):
+        """清空收藏夹"""
+        if not self.favorites:
+            messagebox.showinfo("提示", "收藏夹已经是空的")
+            return
+
+        if messagebox.askyesno("确认清空", "确定要清空收藏夹吗？此操作不可恢复！"):
+            self.favorites.clear()
+            self.save_favorites()
+            messagebox.showinfo("成功", "收藏夹已清空")
+            print("收藏夹已清空")
+
+    def show_favorites(self):
+        """显示收藏夹"""
+        # 重新加载收藏列表
+        self.favorites = self.load_favorites()
+
+        if not self.favorites:
+            self._show_playback_info("收藏夹为空")
+            return
+
+        # 将收藏歌曲显示到播放列表
+        self._update_playlist_with_tracks(self.favorites, "收藏夹")
+
+    def load_favorites(self):
+        """加载收藏列表"""
+        try:
+            if os.path.exists(self.favorites_file):
+                with open(self.favorites_file, 'r', encoding='utf-8') as f:
+                    favorites_data = json.load(f)
+                    print(f"成功加载收藏列表，共 {len(favorites_data)} 首歌曲")
+                    return favorites_data
+            else:
+                print("收藏文件不存在，创建空列表")
+                return []
+        except Exception as e:
+            print(f"加载收藏列表失败: {e}")
+            return []
+
+    def save_favorites(self):
+        """保存收藏列表"""
+        try:
+            with open(self.favorites_file, 'w', encoding='utf-8') as f:
+                json.dump(self.favorites, f, ensure_ascii=False, indent=2)
+            print(f"成功保存收藏列表，共 {len(self.favorites)} 首歌曲")
+        except Exception as e:
+            print(f"保存收藏列表失败: {e}")
+
+    def add_current_to_favorites(self):
+        """添加当前歌曲到收藏"""
+        if not self.current_track:
+            messagebox.showwarning("提示", "没有正在播放的歌曲")
+            return
+
+        # 检查是否已经收藏
+        track_id = self.current_track.get('id')
+        if any(fav.get('id') == track_id for fav in self.favorites):
+            messagebox.showinfo("提示", "该歌曲已在收藏夹中")
+            return
+
+        # 添加到收藏
+        self.favorites.append(self.current_track.copy())  # 使用copy避免引用问题
+        self.save_favorites()
+        messagebox.showinfo("成功", f"已收藏: {self.current_track.get('name', '未知歌曲')}")
+
+    def search_and_display(self, keyword, list_name):
+        """搜索并显示到播放列表"""
+        self._show_playback_info(f"正在加载{list_name}...")
+
+        # 获取搜索数量
+        try:
+            count = int(self.search_count_var.get())
+        except:
+            count = 50  # 默认值
+
+        # 在新线程中执行搜索
+        threading.Thread(target=self._search_and_display_thread, args=(keyword, list_name, count), daemon=True).start()
+
+    def _search_and_display_thread(self, keyword, list_name, count=50):
+        """搜索并显示线程"""
+        try:
+            result = self.api.search(keyword, source="网易云音乐", count=count)
+
+            if result and result.get("code") == 200 and "data" in result and result["data"]:
+                tracks = result["data"]
+
+                # 在主线程中更新播放列表
+                self.root.after(0, lambda: self._update_playlist_with_tracks(tracks, list_name))
+            else:
+                self.root.after(0, lambda: self._show_playback_info(f"加载{list_name}失败"))
+
+        except Exception as e:
+            print(f"加载{list_name}失败: {e}")
+            self.root.after(0, lambda: self._show_playback_info(f"加载{list_name}失败"))
+
+    def _update_playlist_with_tracks(self, tracks, list_name):
+        """用指定歌曲更新播放列表"""
+        try:
+            # 清空当前播放列表
+            self.left_panel.clear_playlist_tree()
+            self.playlist.clear()
+
+            # 添加歌曲到播放列表
+            for track in tracks:
+                self.add_to_playlist(track)
+
+            # 显示成功信息
+            song_count = len(tracks)
+            self._show_playback_info(f"已加载 {song_count} 首{list_name}歌曲")
+            print(f"成功添加 {song_count} 首{list_name}歌曲到播放列表")
+        except Exception as e:
+            print(f"更新播放列表失败: {e}")
+            self._show_playback_info("播放列表更新失败")
+
     def auto_search_hot_songs(self):
         """自动搜索热门歌曲并添加到播放列表"""
         print("正在自动搜索热门歌曲...")
@@ -91,7 +217,7 @@ class MusicPlayerGUI:
         # 在新线程中执行搜索
         threading.Thread(target=self._auto_search_thread, daemon=True).start()
 
-    def _auto_search_thread(self):
+    def _auto_search_thread(self,count =100):
         """自动搜索线程"""
         try:
             # 使用多个热门关键词来获取更多歌曲
@@ -102,7 +228,7 @@ class MusicPlayerGUI:
             for keyword in hot_keywords:
                 try:
                     print(f"搜索热门关键词: {keyword}")
-                    result = self.api.search(keyword, source="网易云音乐", count=100)
+                    result = self.api.search(keyword, source="网易云音乐", count= count)
 
                     if result and result.get("code") == 200 and "data" in result and result["data"]:
                         tracks = result["data"]
@@ -115,7 +241,7 @@ class MusicPlayerGUI:
                         print(f"关键词 '{keyword}' 找到 {len(tracks)} 首歌曲，去重后总数为 {len(all_tracks)}")
 
                         # 如果已经收集到足够多的歌曲，就停止搜索
-                        if len(all_tracks) >= 100:
+                        if len(all_tracks) >= count:
                             break
 
                     # 短暂延迟，避免请求过于频繁
@@ -127,38 +253,14 @@ class MusicPlayerGUI:
                     continue
 
             # 限制最多200首
-            final_tracks = all_tracks[:200]
+            final_tracks = all_tracks[:count]
 
             # 在主线程中更新UI
-            self.root.after(0, lambda: self._update_playlist_with_hot_songs(final_tracks))
+            self.root.after(0, lambda: self._update_playlist_with_tracks(final_tracks, "热门"))
 
         except Exception as e:
             print(f"自动搜索热门歌曲失败: {e}")
             self.root.after(0, lambda: self._show_playback_info("热门歌曲加载失败"))
-
-    def _update_playlist_with_hot_songs(self, tracks):
-        """用热门歌曲更新播放列表"""
-        try:
-            # 清空当前播放列表
-            for item in self.playlist_tree.get_children():
-                self.playlist_tree.delete(item)
-            self.playlist.clear()
-
-            # 添加热门歌曲到播放列表
-            for track in tracks:
-                self.add_to_playlist(track)
-
-            # 更新搜索结果显示（可选）
-            self.search_results = tracks
-            self._update_search_results()
-
-            # 显示成功信息
-            song_count = len(tracks)
-            self._show_playback_info(f"已加载 {song_count} 首热门歌曲")
-            print(f"成功添加 {song_count} 首热门歌曲到播放列表")
-        except Exception as e:
-            print(f"更新播放列表失败: {e}")
-            self._show_playback_info("播放列表更新失败")
 
     def create_ui(self):
         # 设置全局样式
@@ -250,6 +352,18 @@ class MusicPlayerGUI:
                                     width=12, state="readonly")
         source_combo.pack(side=tk.LEFT, padx=5, pady=8)
 
+        # 搜索数量选择
+        count_label = tk.Label(search_container, text="📊 数量:", bg=current_theme["secondary_bg"],
+                               fg=current_theme["text"],
+                               font=("Microsoft YaHei", 10))
+        count_label.pack(side=tk.LEFT, padx=(15, 5), pady=8)
+
+        self.search_count_var = tk.StringVar(value="50")  # 默认50首
+        count_combo = ttk.Combobox(search_container, textvariable=self.search_count_var,
+                                   values=["10", "20", "30", "50", "100"],
+                                   width=8, state="normal")
+        count_combo.pack(side=tk.LEFT, padx=5, pady=8)
+
         # 搜索框
         self.search_var = tk.StringVar()
         search_entry = tk.Entry(search_container, textvariable=self.search_var,
@@ -304,114 +418,17 @@ class MusicPlayerGUI:
         theme_combo.pack(side=tk.LEFT, padx=5)
         theme_combo.bind("<<ComboboxSelected>>", self.on_theme_change)
 
+        # 搜索结果下拉框架（初始隐藏）
+        self.search_results_frame = tk.Frame(search_frame, bg=current_theme["secondary_bg"])
+        # 不立即pack，等搜索时再显示
+
     def create_left_panel(self, paned_window):
-        left_frame = tk.Frame(paned_window, bg="#1a1a1a")
-        paned_window.add(left_frame, weight=1)
+        """创建左侧播放列表和搜索结果面板"""
+        # 创建左面板实例
+        self.left_panel = LeftPanel(paned_window, self)
 
-        # 播放列表区域
-        playlist_container = tk.Frame(left_frame, bg="#1a1a1a")
-        playlist_container.pack(fill=tk.BOTH, expand=True)
-
-        # 播放列表标题栏
-        playlist_header = tk.Frame(playlist_container, bg="#2C3E50", height=35)
-        playlist_header.pack(fill=tk.X, pady=(0, 5))
-        playlist_header.pack_propagate(False)
-
-        playlist_label = tk.Label(playlist_header, text="🎵 播放列表",
-                                  font=("Microsoft YaHei", 12, "bold"),
-                                  bg="#2C3E50", fg="#ecf0f1")
-        playlist_label.pack(side=tk.LEFT, padx=15, pady=8)
-
-        # 歌曲计数
-        self.playlist_count_var = tk.StringVar(value="0 首")
-        playlist_count_label = tk.Label(playlist_header, textvariable=self.playlist_count_var,
-                                        font=("Microsoft YaHei", 10),
-                                        bg="#2C3E50", fg="#bdc3c7")
-        playlist_count_label.pack(side=tk.LEFT, padx=10, pady=8)
-
-        # 清除播放列表按钮
-        clear_playlist_btn = tk.Button(playlist_header, text="🗑️ 清空",
-                                       command=self.clear_playlist,
-                                       bg="#e74c3c", fg="white",
-                                       font=("Microsoft YaHei", 9),
-                                       relief="flat", padx=10, cursor="hand2")
-        clear_playlist_btn.pack(side=tk.RIGHT, padx=15, pady=8)
-
-        # 播放列表框架
-        playlist_frame = tk.Frame(playlist_container, bg="#1a1a1a")
-        playlist_frame.pack(fill=tk.BOTH, expand=True)
-
-        # 创建树形视图显示播放列表
-        columns = ("#", "歌曲", "歌手", "专辑")
-        self.playlist_tree = ttk.Treeview(playlist_frame, columns=columns,
-                                          show="headings", height=8,
-                                          style="Treeview")
-
-        # 配置列宽和锚点
-        self.playlist_tree.column("#", width=30, anchor=tk.CENTER)
-        self.playlist_tree.column("歌曲", width=120, anchor=tk.W)
-        self.playlist_tree.column("歌手", width=80, anchor=tk.W)
-        self.playlist_tree.column("专辑", width=100, anchor=tk.W)
-
-        for col in columns:
-            self.playlist_tree.heading(col, text=col)
-
-        # 滚动条
-        scrollbar = ttk.Scrollbar(playlist_frame, orient=tk.VERTICAL,
-                                  command=self.playlist_tree.yview)
-        self.playlist_tree.configure(yscrollcommand=scrollbar.set)
-
-        self.playlist_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(2, 0))
-
-        # 绑定双击事件
-        self.playlist_tree.bind("<Double-1>", self.on_playlist_double_click)
-
-        # 搜索结果区域
-        search_result_container = tk.Frame(left_frame, bg="#1a1a1a")
-        search_result_container.pack(fill=tk.BOTH, expand=True)
-
-        # 搜索结果标题栏
-        search_header = tk.Frame(search_result_container, bg="#2C3E50", height=35)
-        search_header.pack(fill=tk.X, pady=(10, 5))
-        search_header.pack_propagate(False)
-
-        search_label = tk.Label(search_header, text="🔍 搜索结果",
-                                font=("Microsoft YaHei", 12, "bold"),
-                                bg="#2C3E50", fg="#ecf0f1")
-        search_label.pack(side=tk.LEFT, padx=15, pady=8)
-
-        # 搜索结果计数
-        self.search_count_var = tk.StringVar(value="0 首")
-        search_count_label = tk.Label(search_header, textvariable=self.search_count_var,
-                                      font=("Microsoft YaHei", 10),
-                                      bg="#2C3E50", fg="#bdc3c7")
-        search_count_label.pack(side=tk.LEFT, padx=10, pady=8)
-
-        # 搜索结果列表框架
-        search_result_frame = tk.Frame(search_result_container, bg="#1a1a1a")
-        search_result_frame.pack(fill=tk.BOTH, expand=True)
-
-        columns = ("歌曲", "歌手", "专辑")
-        self.search_tree = ttk.Treeview(search_result_frame, columns=columns,
-                                        show="headings", height=6,
-                                        style="Treeview")
-
-        for col in columns:
-            self.search_tree.heading(col, text=col)
-            self.search_tree.column(col, width=150, anchor=tk.W)
-
-        # 滚动条
-        search_scrollbar = ttk.Scrollbar(search_result_frame, orient=tk.VERTICAL,
-                                         command=self.search_tree.yview)
-        self.search_tree.configure(yscrollcommand=search_scrollbar.set)
-
-        self.search_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
-        search_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(2, 0))
-
-        # 绑定事件
-        self.search_tree.bind("<Double-1>", self.on_search_double_click)
-        self.search_tree.bind("<Button-1>", self.on_search_single_click)
+        # 添加到paned_window
+        paned_window.add(self.left_panel.main_frame, weight=1)
 
     def create_right_panel(self, paned_window):
         """创建右侧专辑和歌词面板"""
@@ -475,7 +492,6 @@ class MusicPlayerGUI:
         status_frame = tk.Frame(top_frame, bg=current_theme["secondary_bg"])
         status_frame.pack(side=tk.RIGHT, fill=tk.Y)
         self.status_frame = status_frame
-
 
         playback_info_frame = tk.Frame(status_frame, bg=current_theme["secondary_bg"], height=20)
         playback_info_frame.pack(fill=tk.X)
@@ -579,6 +595,14 @@ class MusicPlayerGUI:
                                        hover_fg="white",
                                        size=32, font_size=10)
         self.stop_btn.pack(side=tk.LEFT, padx=3)
+
+        self.favorite_btn = CircularButton(button_frame, "    ❤️", self.add_current_to_favorites,
+                                           normal_bg=current_theme["accent"],
+                                           normal_fg="white",
+                                           hover_bg=current_theme["button_hover"],
+                                           hover_fg="white",
+                                           size=36, font_size=16)
+        self.favorite_btn.pack(side=tk.LEFT, padx=3)
 
         # 右侧：设置控件（按照新顺序：音质 -> 模式 -> 频谱 -> 主题）
         settings_frame = tk.Frame(bottom_frame, bg=current_theme["secondary_bg"])
@@ -688,8 +712,6 @@ class MusicPlayerGUI:
         text = self.playback_info_var.get()
         self._check_and_start_scroll(text)
 
-
-
     def on_theme_change(self, event):
         """切换主题"""
         theme_name_cn = self.theme_var.get()
@@ -730,19 +752,54 @@ class MusicPlayerGUI:
         if hasattr(self.player, 'duration') and self.player.duration > 0:
             self.player.seek(self.player.duration - 1)
 
+    def add_playlist_to_favorites(self):
+        """收藏当前播放列表中的所有歌曲"""
+        if not self.playlist:
+            messagebox.showwarning("提示", "播放列表为空")
+            return
+
+        # 统计新增的收藏数量
+        added_count = 0
+        already_exists_count = 0
+
+        for track in self.playlist:
+            track_id = track.get('id')
+            # 检查是否已经收藏
+            if not any(fav.get('id') == track_id for fav in self.favorites):
+                self.favorites.append(track.copy())  # 使用copy避免引用问题
+                added_count += 1
+            else:
+                already_exists_count += 1
+
+        # 保存收藏列表
+        if added_count > 0:
+            self.save_favorites()
+
+        # 显示结果信息
+        if added_count > 0 and already_exists_count > 0:
+            message = f"成功收藏 {added_count} 首歌曲，{already_exists_count} 首已存在收藏夹中"
+        elif added_count > 0:
+            message = f"成功收藏 {added_count} 首歌曲到收藏夹"
+        elif already_exists_count > 0:
+            message = f"播放列表中的所有 {already_exists_count} 首歌曲都已存在于收藏夹中"
+        else:
+            message = "没有新增收藏的歌曲"
+
+        messagebox.showinfo("收藏结果", message)
+        self._show_playback_info(f"收藏完成: 新增{added_count}首, 已存在{already_exists_count}首")
+
     def clear_playlist(self):
         """清除播放列表"""
         if messagebox.askyesno("确认", "确定要清除播放列表吗？"):
             # 清空树形视图
-            for item in self.playlist_tree.get_children():
-                self.playlist_tree.delete(item)
+            self.left_panel.clear_playlist_tree()
             # 清空播放列表数据
             self.playlist.clear()
             self.current_index = 0
             # 重置高亮状态
             self.current_playlist_item = None
             self.current_playlist_index = -1
-            self.update_playlist_count()
+            self.left_panel.update_playlist_count(0)
 
     def _show_playback_info(self, info_text):
         """显示播放状态信息"""
@@ -840,24 +897,98 @@ class MusicPlayerGUI:
             messagebox.showwarning("提示", "请输入搜索关键词")
             return
 
-        # 清空之前的搜索结果
-        for item in self.search_tree.get_children():
-            self.search_tree.delete(item)
+        # 显示搜索结果下拉框
+        self._show_search_results_dropdown()
 
         # 在新线程中执行搜索
         threading.Thread(target=self._search_thread, args=(keyword,), daemon=True).start()
 
+    def _show_search_results_dropdown(self):
+        """显示搜索结果下拉框 - 美化版本"""
+        # 先隐藏之前的下拉框
+        self._hide_search_results_dropdown()
+
+        # 获取当前主题
+        current_theme = self.theme_manager.get_current_theme()
+
+        # 创建新的下拉框架
+        self.search_results_frame = tk.Toplevel(self.root)
+        self.search_results_frame.overrideredirect(True)
+        self.search_results_frame.configure(bg=current_theme["secondary_bg"])
+        self.search_results_frame.attributes("-topmost", True)
+
+        # 设置圆角效果（通过设置合适的边框和背景）
+        self.search_results_frame.configure(relief=tk.RAISED, bd=2)
+
+        # 定位在搜索框下方
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_width = self.root.winfo_width()
+
+        # 计算合适的位置和大小
+        dropdown_width = min(700, root_width - 100)  # 最大700px，最小留边距
+        dropdown_height = 350  # 固定高度
+
+        # 定位在窗口中央偏上
+        x = root_x + (root_width - dropdown_width) // 2
+        y = root_y + 120  # 距离顶部120像素
+
+        self.search_results_frame.geometry(f"{dropdown_width}x{dropdown_height}+{x}+{y}")
+        self.search_results_visible = True
+
+        # 绑定点击外部隐藏事件
+        self.search_results_frame.bind("<FocusOut>", lambda e: self._hide_search_results_dropdown())
+        self.root.bind("<Button-1>", self._on_root_click)
+
+    def _on_root_click(self, event):
+        """点击窗口其他位置时隐藏下拉框"""
+        if (self.search_results_frame and self.search_results_visible and
+                not self._is_event_in_widget(event, self.search_results_frame)):
+            self._hide_search_results_dropdown()
+
+    def _is_event_in_widget(self, event, widget):
+        """检查事件是否发生在指定widget内"""
+        try:
+            x = widget.winfo_rootx()
+            y = widget.winfo_rooty()
+            width = widget.winfo_width()
+            height = widget.winfo_height()
+
+            return (x <= event.x_root <= x + width and
+                    y <= event.y_root <= y + height)
+        except:
+            return False
+
+    def _hide_search_results_dropdown(self):
+        """隐藏搜索结果下拉框"""
+        if self.search_results_frame and self.search_results_visible:
+            try:
+                # 解绑所有事件
+                self.search_results_frame.unbind("<MouseWheel>")
+                self.root.unbind("<Button-1>")
+                self.search_results_frame.destroy()
+            except:
+                pass
+            self.search_results_frame = None
+            self.search_results_visible = False
+
     def _search_thread(self, keyword):
         try:
             source = self.source_var.get()
-            result = self.api.search(keyword, source=source)
+            # 获取搜索数量
+            try:
+                count = int(self.search_count_var.get())
+            except:
+                count = 50  # 默认值
+
+            result = self.api.search(keyword, source=source, count=count)
 
             print(f"搜索结果: {result}")
 
             # 修改判断条件
             if result and result.get("code") == 200 and "data" in result and result["data"]:
                 self.search_results = result["data"]
-                self.root.after(0, self._update_search_results)
+                self.root.after(0, self._update_search_results_dropdown)
             else:
                 error_msg = result.get("msg", "未找到相关歌曲") if result else "搜索无结果"
                 self.root.after(0, lambda: messagebox.showerror("提示", error_msg))
@@ -865,46 +996,275 @@ class MusicPlayerGUI:
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror("错误", f"搜索失败: {str(e)}"))
 
-    def _update_search_results(self):
-        # 更新搜索结果列表
-        for item in self.search_tree.get_children():
-            self.search_tree.delete(item)
+    def _update_search_results_dropdown(self):
+        """更新搜索结果下拉框 - 确保能显示内容的简化美化版"""
+        if not self.search_results_frame or not self.search_results_visible:
+            return
 
+        # 清空现有内容
+        for widget in self.search_results_frame.winfo_children():
+            widget.destroy()
+
+        # 获取主题颜色
+        theme = self.theme_manager.get_current_theme()
+        bg_color = theme["secondary_bg"]
+        text_color = theme["text"]
+        accent_color = theme["accent"]
+
+        # 设置下拉框背景
+        self.search_results_frame.configure(bg=bg_color)
+
+        # 创建标题栏 - 保持简单
+        header_frame = tk.Frame(self.search_results_frame, bg=accent_color, height=35)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+
+        header_label = tk.Label(header_frame, text="🔍 搜索结果",
+                                bg=accent_color, fg="white",
+                                font=("Microsoft YaHei", 11, "bold"))
+        header_label.pack(side=tk.LEFT, padx=15, pady=8)
+
+        count_label = tk.Label(header_frame, text=f"共找到 {len(self.search_results)} 首歌曲",
+                               bg=accent_color, fg="white",
+                               font=("Microsoft YaHei", 9))
+        count_label.pack(side=tk.RIGHT, padx=15, pady=8)
+
+        # 如果没有搜索结果
+        if not self.search_results:
+            no_results_label = tk.Label(self.search_results_frame, text="🎵 未找到相关歌曲",
+                                        bg=bg_color, fg=theme["secondary_text"],
+                                        font=("Microsoft YaHei", 12))
+            no_results_label.pack(expand=True, fill=tk.BOTH, pady=20)
+            return
+
+        # 创建滚动框架 - 使用最可靠的实现
+        main_frame = tk.Frame(self.search_results_frame, bg=bg_color)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 创建滚动条
+        scrollbar = ttk.Scrollbar(main_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 创建Canvas用于滚动
+        canvas = tk.Canvas(main_frame, bg=bg_color, highlightthickness=0, yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar.config(command=canvas.yview)
+
+        # 创建内部框架
+        inner_frame = tk.Frame(canvas, bg=bg_color)
+        canvas.create_window((0, 0), window=inner_frame, anchor="nw")
+
+        # 配置滚动区域
+        def configure_scrollregion(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        inner_frame.bind("<Configure>", configure_scrollregion)
+
+        # 鼠标滚轮事件处理
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        # 绑定鼠标滚轮到整个下拉框和canvas
+        self.search_results_frame.bind("<MouseWheel>", _on_mousewheel)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        inner_frame.bind("<MouseWheel>", _on_mousewheel)
+
+        # 递归绑定鼠标滚轮到所有子组件
+        def bind_to_children(widget):
+            for child in widget.winfo_children():
+                child.bind("<MouseWheel>", _on_mousewheel)
+                bind_to_children(child)
+
+        bind_to_children(inner_frame)
+
+        # 添加搜索结果
         for i, track in enumerate(self.search_results):
-            # 修改这里：artist 是字符串列表，不是字典列表
+            # 创建歌曲框架 - 使用grid布局确保按钮固定
+            song_frame = tk.Frame(inner_frame, bg=bg_color)
+            song_frame.pack(fill=tk.X, padx=10, pady=3)
+
+            # 使用grid布局
+            song_frame.columnconfigure(0, weight=1)  # 歌曲信息列可扩展
+            song_frame.columnconfigure(1, weight=0)  # 按钮列固定宽度
+
+            # 歌曲信息
+            song_name = track.get('name', '未知歌曲')
             artist_list = track.get('artist', [])
             if isinstance(artist_list, list) and artist_list:
-                # 如果是字符串列表，直接使用
-                artist_str = ', '.join(artist_list)
+                artist_str = ' • '.join(artist_list)
             else:
                 artist_str = '未知歌手'
 
-            self.search_tree.insert("", "end", values=(
-                track.get('name', '未知歌曲'),
-                artist_str,
-                track.get('album', '未知专辑')
-            ), tags=(str(i),))
-        self.update_search_count()
+            # 创建信息Canvas用于滚动文本
+            info_canvas = tk.Canvas(song_frame,
+                                    bg=bg_color,
+                                    highlightthickness=0,
+                                    height=30,  # 固定高度
+                                    width=400)  # 固定宽度，超出部分滚动
+            info_canvas.grid(row=0, column=0, sticky="ew", padx=(5, 10), pady=5)
 
-    def on_search_double_click(self, event):
-        """双击搜索结果 - 添加到播放列表并立即播放"""
-        item = self.search_tree.selection()[0]
-        index = int(self.search_tree.item(item, "tags")[0])
-        track = self.search_results[index]
+            # 在Canvas上创建文本
+            full_text = f"{i + 1:2d}. {song_name} - {artist_str}"
+            text_id = info_canvas.create_text(0, 15,
+                                              text=full_text,
+                                              anchor="w",
+                                              font=("Microsoft YaHei", 10),
+                                              fill=text_color,
+                                              tags="text")
+
+            # 检查文本是否需要滚动
+            def check_scroll(canvas=info_canvas, text_id=text_id, full_text=full_text):
+                canvas.update_idletasks()
+                text_bbox = canvas.bbox(text_id)
+                if text_bbox and text_bbox[2] > canvas.winfo_width():
+                    # 文本过长，启动滚动动画
+                    start_scroll_animation(canvas, text_id, text_bbox[2])
+                else:
+                    # 文本不需要滚动，正常显示
+                    canvas.coords(text_id, 5, 15)
+
+            # 滚动动画函数
+            def start_scroll_animation(canvas, text_id, text_width):
+                canvas_width = canvas.winfo_width()
+                start_x = 5
+                end_x = -(text_width - canvas_width + 20)
+
+                def animate(position):
+                    canvas.coords(text_id, position, 15)
+                    if position > end_x:
+                        canvas.after(30, animate, position - 1)
+                    else:
+                        # 滚动完成后等待2秒再重新开始
+                        canvas.after(2000, lambda: animate(start_x))
+
+                # 先正常显示3秒再开始滚动
+                canvas.after(3000, lambda: animate(start_x))
+
+            # 延迟检查滚动
+            canvas.after(100, check_scroll)
+
+            # 按钮容器 - 使用固定宽度
+            btn_frame = tk.Frame(song_frame, bg=bg_color)
+            btn_frame.grid(row=0, column=1, sticky="e", padx=5)
+
+            # 播放按钮
+            play_btn = tk.Button(btn_frame, text="▶ 播放",
+                                 command=lambda t=track: self._play_from_dropdown(t),
+                                 bg=accent_color, fg="white",
+                                 font=("Microsoft YaHei", 8, "bold"),
+                                 relief="flat", bd=0,
+                                 width=8,  # 固定宽度
+                                 padx=8, pady=3)
+            play_btn.pack(side=tk.LEFT, padx=2)
+
+            # 添加按钮
+            add_btn = tk.Button(btn_frame, text="➕ 添加",
+                                command=lambda t=track: self._add_from_dropdown(t),
+                                bg="#27ae60", fg="white",
+                                font=("Microsoft YaHei", 8, "bold"),
+                                relief="flat", bd=0,
+                                width=8,  # 固定宽度
+                                padx=8, pady=3)
+            add_btn.pack(side=tk.LEFT, padx=2)
+
+            # 收藏按钮 - 修正函数调用
+            fav_btn = tk.Button(btn_frame, text="❤️ 收藏",
+                                command=lambda t=track: self._add_to_favorites_from_dropdown(t),
+                                bg="#e74c3c", fg="white",  # 使用红色区分
+                                font=("Microsoft YaHei", 8, "bold"),
+                                relief="flat", bd=0,
+                                width=8,  # 固定宽度
+                                padx=8, pady=3)
+            fav_btn.pack(side=tk.LEFT, padx=2)
+
+        # 底部操作栏
+        bottom_frame = tk.Frame(self.search_results_frame, bg=bg_color, height=40)
+        bottom_frame.pack(fill=tk.X, pady=5)
+        bottom_frame.pack_propagate(False)
+
+        # 添加全部按钮
+        def add_all():
+            for track in self.search_results:
+                self._add_from_dropdown(track)
+            self._hide_search_results_dropdown()
+            self._show_playback_info(f"已添加所有 {len(self.search_results)} 首歌曲")
+
+        add_all_btn = tk.Button(bottom_frame, text="📥 添加全部",
+                                command=add_all,
+                                bg="#27ae60", fg="white",
+                                font=("Microsoft YaHei", 9),
+                                relief="flat", bd=0,
+                                padx=15, pady=5)
+        add_all_btn.pack(side=tk.LEFT, padx=15)
+
+        # 收藏全部按钮 - 修正函数名
+        def fav_all():
+            for track in self.search_results:
+                self._add_to_favorites_from_dropdown(track)
+            self._hide_search_results_dropdown()
+            self._show_playback_info(f"已收藏所有 {len(self.search_results)} 首歌曲")
+
+        fav_all_btn = tk.Button(bottom_frame, text="❤️ 收藏全部",
+                                command=fav_all,
+                                bg="#e74c3c", fg="white",  # 使用红色
+                                font=("Microsoft YaHei", 9),
+                                relief="flat", bd=0,
+                                padx=15, pady=5)
+        fav_all_btn.pack(side=tk.LEFT, padx=15)
+
+        # 关闭按钮
+        close_btn = tk.Button(bottom_frame, text="✕ 关闭",
+                              command=self._hide_search_results_dropdown,
+                              bg="#95a5a6", fg="white",
+                              font=("Microsoft YaHei", 9),
+                              relief="flat", bd=0,
+                              padx=15, pady=5)
+        close_btn.pack(side=tk.RIGHT, padx=15)
+
+        # 更新滚动区域
+        self.search_results_frame.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+
+    def _add_to_favorites_from_dropdown(self, track):
+        """从下拉框添加歌曲到收藏"""
+        # 检查是否已经收藏
+        track_id = track.get('id')
+        if any(fav.get('id') == track_id for fav in self.favorites):
+            self._show_playback_info("该歌曲已在收藏夹中")
+            return
+
+        # 添加到收藏
+        self.favorites.append(track)
+        self.save_favorites()
+        self._show_playback_info(f"已收藏: {track.get('name', '未知歌曲')}")
+        self._hide_search_results_dropdown()
+
+    def _add_from_dropdown(self, track):
+        """从下拉框添加歌曲"""
+
+        self.add_to_playlist(track)
+        self._hide_search_results_dropdown()
+        self._show_playback_info(f"已添加: {track.get('name', '未知歌曲')}")
+
+    def _play_from_dropdown(self, track):
+        """从下拉框播放歌曲"""
         self.add_to_playlist(track)
         self.current_index = len(self.playlist) - 1
         self.play_track(track)
+        self._hide_search_results_dropdown()
+
+    def on_search_double_click(self, event):
+        """双击搜索结果 - 添加到播放列表并立即播放"""
+        # 这个功能现在在播放列表中处理
 
     def on_search_single_click(self, event):
         """单击搜索结果 - 只添加到播放列表"""
-        item = self.search_tree.identify_row(event.y)
-        if item:
-            index = int(self.search_tree.item(item, "tags")[0])
-            track = self.search_results[index]
-            self.add_to_playlist(track)
+        # 这个功能现在在下拉框中处理
 
     def _highlight_current_playlist_item(self, track):
-        """高亮显示当前播放的播放列表项"""
+        """高亮显示当前播放的播放列表项 - 使用新的左面板接口"""
         # 查找当前歌曲在播放列表中的索引
         for i, playlist_track in enumerate(self.playlist):
             if (playlist_track.get('id') == track.get('id') and
@@ -914,26 +1274,26 @@ class MusicPlayerGUI:
 
         # 在Treeview中找到对应的item并高亮
         if self.current_playlist_index >= 0:
-            children = self.playlist_tree.get_children()
+            children = self.left_panel.playlist_tree.get_children()
             if self.current_playlist_index < len(children):
                 item = children[self.current_playlist_index]
                 self.current_playlist_item = item
 
                 # 设置高亮样式
-                self.playlist_tree.selection_set(item)
-                self.playlist_tree.focus(item)
-                self.playlist_tree.see(item)  # 滚动到可见区域
+                self.left_panel.set_playlist_selection(item)
+                self.left_panel.set_playlist_focus(item)
+                self.left_panel.see_playlist_item(item)
 
                 # 配置高亮颜色
-                self.playlist_tree.tag_configure('playing', background='#3498DB', foreground='white')
-                self.playlist_tree.item(item, tags=('playing',))
+                self.left_panel.configure_playlist_tag('playing', background='#3498DB', foreground='white')
+                self.left_panel.set_playlist_item_tags(item, ('playing',))
 
     def _clear_playlist_highlight(self):
-        """清除播放列表的高亮"""
+        """清除播放列表的高亮 - 使用新的左面板接口"""
         if self.current_playlist_item:
             try:
-                self.playlist_tree.selection_remove(self.current_playlist_item)
-                self.playlist_tree.item(self.current_playlist_item, tags=())
+                self.left_panel.clear_playlist_selection()
+                self.left_panel.set_playlist_item_tags(self.current_playlist_item, ())
             except tk.TclError:
                 pass
         self.current_playlist_item = None
@@ -1302,24 +1662,27 @@ class MusicPlayerGUI:
     def update_playlist_count(self):
         """更新播放列表计数"""
         count = len(self.playlist)
-        self.playlist_count_var.set(f"{count} 首")
-
-    def update_search_count(self):
-        """更新搜索结果计数"""
-        count = len(self.search_results)
-        self.search_count_var.set(f"{count} 首")
+        self.left_panel.update_playlist_count(count)
 
     def add_to_playlist(self, track):
+        """添加到播放列表 - 使用新的左面板接口"""
+        # 检查是否已存在
+        track_id = track.get('id')
+        if any(t.get('id') == track_id for t in self.playlist):
+            print(f"歌曲已存在: {track.get('name')}")
+            return
+
         self.playlist.append(track)
 
-        # 同样修改这里的artist处理
+        # 处理艺术家信息
         artist_list = track.get('artist', [])
         if isinstance(artist_list, list) and artist_list:
             artist_str = ', '.join(artist_list)
         else:
             artist_str = '未知歌手'
 
-        item = self.playlist_tree.insert("", "end", values=(
+        # 插入播放列表项
+        item = self.left_panel.insert_playlist_item((
             len(self.playlist),
             track.get('name', '未知歌曲'),
             artist_str,
@@ -1331,19 +1694,24 @@ class MusicPlayerGUI:
                 track.get('id') == self.current_track.get('id') and
                 track.get('name') == self.current_track.get('name')):
             self.current_playlist_item = item
-            self.playlist_tree.selection_set(item)
-            self.playlist_tree.item(item, tags=('playing',))
-        self.update_playlist_count()
+            self.left_panel.set_playlist_selection(item)
+            self.left_panel.set_playlist_item_tags(item, ('playing',))
+            self.left_panel.configure_playlist_tag('playing', background='#3498DB', foreground='white')
+
+        self.left_panel.update_playlist_count(len(self.playlist))
 
     def on_playlist_double_click(self, event):
-        item = self.playlist_tree.selection()[0]
-        values = self.playlist_tree.item(item, "values")
-        index = int(values[0]) - 1
+        """播放列表双击事件 - 使用新的左面板接口"""
+        selection = self.left_panel.get_playlist_selection()
+        if selection:
+            item = selection[0]
+            values = self.left_panel.playlist_item_values(item)
+            index = int(values[0]) - 1
 
-        if 0 <= index < len(self.playlist):
-            self.current_index = index
-            track = self.playlist[index]
-            self.play_track(track)
+            if 0 <= index < len(self.playlist):
+                self.current_index = index
+                track = self.playlist[index]
+                self.play_track(track)
 
     def set_play_state(self, is_playing):
         """设置播放状态，控制旋转和频谱"""
@@ -1389,6 +1757,10 @@ class MusicPlayerGUI:
             return
 
         try:
+            # 应用主题到左面板
+            if hasattr(self, 'left_panel'):
+                self.left_panel.apply_theme(theme_name)
+
             # 应用主题到专辑歌词面板
             if hasattr(self, 'album_lyrics_panel') and hasattr(self.album_lyrics_panel, 'change_theme'):
                 self.album_lyrics_panel.change_theme(theme_name)
@@ -1630,3 +2002,4 @@ class MusicPlayerGUI:
                     button.canvas.configure(bg=theme["secondary_bg"])
         except Exception as e:
             print(f"更新画布背景时出错: {e}")
+
