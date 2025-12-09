@@ -25,12 +25,13 @@ class CircularButton:
             fill=normal_bg, outline=normal_bg, width=0
         )
 
-        # 绘制文本
+        # 绘制文本 - 使用anchor="center"确保文本居中，特别是对emoji字符
         self.text_item = self.canvas.create_text(
             size // 2, size // 2,
             text=text,
             fill=normal_fg,
-            font=("Segoe UI Symbol", font_size, "bold")
+            font=("Segoe UI Emoji", font_size, "bold"),
+            anchor="center"
         )
 
         # 绑定事件

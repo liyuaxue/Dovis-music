@@ -32,7 +32,8 @@ DEFAULT_CONFIG = {
     "source": "netease",
     "quality": "999",
     "play_mode": "order",
-    "search_count": 20
+    "search_count": 20,
+    "spectrum_mode": "圆形"
 }
 
 # 主题配置

@@ -9,21 +9,12 @@ class LeftPanel:
     def __init__(self, parent, music_player):
         self.parent = parent
         self.music_player = music_player
-
-        # 先初始化变量
         self.playlist_count_var = tk.StringVar(value="0 首")
-
-        # 初始化主题
+        self.playlist_title_var = tk.StringVar(value="🎵 播放列表")
         self.theme_manager = music_player.theme_manager
         self.current_theme = self.theme_manager.get_current_theme()
-
-        # 创建左面板主框架
         self.main_frame = tk.Frame(parent, bg=self.current_theme["bg"])
-
-        # 创建组件区域
         self.create_components_section()
-
-        # 播放列表区域
         self.create_playlist_section()
 
     def create_components_section(self):
@@ -32,18 +23,15 @@ class LeftPanel:
         components_container.pack(fill=tk.X, pady=(0, 10))
         components_container.pack_propagate(False)
 
-        # 组件标题
         components_label = tk.Label(components_container, text="🎵 音乐库",
                                     font=("Microsoft YaHei", 12, "bold"),
                                     bg=self.current_theme["secondary_bg"],
                                     fg=self.current_theme["text"])
         components_label.pack(fill=tk.X, padx=10, pady=5)
 
-        # 组件按钮框架
         buttons_frame = tk.Frame(components_container, bg=self.current_theme["secondary_bg"])
         buttons_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # 创建多个组件按钮
         components_data = [
             {"text": "📋 播放列表", "command": self.show_playlist, "keyword": ""},
             {"text": "❤️ 收藏夹", "command": self.show_favorites, "keyword": "收藏歌曲"},
@@ -53,7 +41,6 @@ class LeftPanel:
             {"text": "🏆 经典榜", "command": self.show_classic_songs, "keyword": "经典老歌"}
         ]
 
-        # 创建2行3列的按钮布局
         for i, comp_data in enumerate(components_data):
             row = i // 3
             col = i % 3
@@ -68,11 +55,7 @@ class LeftPanel:
                             padx=10,
                             pady=8)
             btn.grid(row=row, column=col, padx=5, pady=3, sticky="ew")
-
-            # 存储关键词信息
             btn.keyword = comp_data["keyword"]
-
-            # 设置列权重使按钮均匀分布
             buttons_frame.columnconfigure(col, weight=1)
 
     def create_playlist_section(self):
@@ -80,16 +63,15 @@ class LeftPanel:
         playlist_container = tk.Frame(self.main_frame, bg=self.current_theme["bg"])
         playlist_container.pack(fill=tk.BOTH, expand=True)
 
-        # 播放列表标题栏
         playlist_header = tk.Frame(playlist_container, bg=self.current_theme["secondary_bg"], height=35)
         playlist_header.pack(fill=tk.X, pady=(0, 5))
         playlist_header.pack_propagate(False)
 
-        playlist_label = tk.Label(playlist_header, text="🎵 播放列表",
+        self.playlist_label = tk.Label(playlist_header, textvariable=self.playlist_title_var,
                                   font=("Microsoft YaHei", 12, "bold"),
                                   bg=self.current_theme["secondary_bg"],
                                   fg=self.current_theme["text"])
-        playlist_label.pack(side=tk.LEFT, padx=15, pady=8)
+        self.playlist_label.pack(side=tk.LEFT, padx=15, pady=8)
 
         # 歌曲计数
         self.playlist_count_label = tk.Label(playlist_header, textvariable=self.playlist_count_var,
@@ -152,29 +134,39 @@ class LeftPanel:
         # 绑定双击事件
         self.playlist_tree.bind("<Double-1>", self.music_player.on_playlist_double_click)
 
+    def update_playlist_title(self, title):
+        """更新播放列表标题"""
+        self.playlist_title_var.set(f"🎵 {title}")
+
     def show_playlist(self):
         """显示播放列表"""
+        self.update_playlist_title("播放列表")
         # 清空播放列表显示当前播放列表内容
         self.music_player.auto_search_hot_songs()
 
     def show_favorites(self):
         """显示收藏夹"""
+        self.update_playlist_title("收藏夹")
         self.music_player.show_favorites()
 
     def show_hot_songs(self):
         """显示热歌榜"""
+        self.update_playlist_title("热歌榜")
         self.music_player.search_and_display("热歌榜", "热歌榜")
 
     def show_rising_songs(self):
         """显示飙升榜"""
+        self.update_playlist_title("飙升榜")
         self.music_player.search_and_display("飙升榜", "飙升榜")
 
     def show_new_songs(self):
         """显示新歌榜"""
+        self.update_playlist_title("新歌榜")
         self.music_player.search_and_display("新歌榜", "新歌榜")
 
     def show_classic_songs(self):
         """显示经典榜"""
+        self.update_playlist_title("经典榜")
         self.music_player.search_and_display("经典老歌", "经典榜")
 
     def pack(self, **kwargs):
@@ -284,6 +276,12 @@ class LeftPanel:
                 self.playlist_count_label.configure(
                     bg=theme["secondary_bg"],
                     fg=theme["secondary_text"]
+                )
+                # 更新播放列表标题标签颜色
+                if hasattr(self, 'playlist_label'):
+                    self.playlist_label.configure(
+                        bg=theme["secondary_bg"],
+                        fg=theme["text"]
                 )
             except:
                 pass

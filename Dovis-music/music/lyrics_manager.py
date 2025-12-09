@@ -94,3 +94,9 @@ class LyricsManager:
     def get_all_lyrics(self):
         """获取所有歌词用于显示"""
         return self.lyrics, self.translated_lyrics
+    
+    def clear(self):
+        """清除所有歌词数据"""
+        self.lyrics = {}
+        self.translated_lyrics = {}
+        self.current_index = 0

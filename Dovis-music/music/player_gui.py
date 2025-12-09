@@ -5,6 +5,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFont, ImageFilter
 import io,os
 import requests
 import json
+from typing import Optional, Dict, Any, List
 from music_api import MusicAPI
 from audio_player import AudioPlayer
 from lyrics_manager import LyricsManager
@@ -12,7 +13,12 @@ from album_lyrics_panel import AlbumLyricsPanel
 from left_panel import LeftPanel
 from config import THEMES, THEME_NAMES, DEFAULT_THEME, MUSIC_SOURCES, QUALITY_OPTIONS, PLAY_MODES
 from circular_button import CircularButton
-#8888888888888888888888888888888
+from config_manager import ConfigManager
+from logger_config import setup_logger
+from cache_manager import CacheManager
+from control_bar_ui import ControlBarUI
+from search_ui import SearchUI
+from playback_service import PlaybackService
 
 
 class ThemeManager:
@@ -50,50 +56,104 @@ class ThemeManager:
 
 class MusicPlayerGUI:
     def __init__(self, root):
-        self.current_playlist_item = None  # 当前播放的播放列表项ID
-        self.current_playlist_index = -1  # 当前播放的播放列表索引
+        self.logger = setup_logger("DovisMusic", log_file="logs/dovis_music.log")
+        self.logger.info("初始化音乐播放器...")
+        
+        self.config = ConfigManager()
+        self.cache_manager = CacheManager()
+        
+        self.current_playlist_item = None
+        self.current_playlist_index = -1
         self._playback_finished_triggered = False
-        self.search_count_var = tk.StringVar(value="50")   # 默认搜索50首
-
-        self.current_lyric_var = None  # 会在create_control_bar中初始化
+        self._is_seeking = False
+        
+        default_search_count = str(self.config.get_search_count())
+        self.search_count_var = tk.StringVar(value=default_search_count)
+        self.current_lyric_var = None
         self.current_lyric_label = None
 
         self.root = root
         self.root.title("Dovis-music")
-        self.root.geometry("1200x900")
+        
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        window_width = min(1200, int(screen_width * 0.9))
+        window_height = min(900, int(screen_height * 0.9))
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        self.root.minsize(800, 600)
+        self.root.bind("<Configure>", self._on_window_resize)
+        self._last_width = window_width
+        self._last_height = window_height
         self.root.configure(bg="#f0f0f0")
 
-        # 初始化主题管理器
         self.theme_manager = ThemeManager()
+        saved_theme = self.config.get_theme()
+        if saved_theme:
+            self.theme_manager.set_theme(saved_theme)
 
-        # 初始化组件
         self.api = MusicAPI()
         self.player = AudioPlayer()
         self.lyrics_manager = LyricsManager()
 
-        # 音乐数据
         self.search_results = []
         self.current_track = None
         self.playlist = []
         self.current_index = 0
-
-        # 添加收藏功能相关变量
         self.favorites_file = "favorites.json"
         self.favorites = self.load_favorites()
-
-        # 搜索结果框架引用
         self.search_results_frame = None
         self.search_results_visible = False
-
-        # 设置播放器回调
         self.player.update_callback = self.on_position_update
+        
+        saved_volume = self.config.get_volume()
+        if saved_volume:
+            self.player.set_volume(saved_volume)
 
-        # 创建UI
+        self.current_song_var = tk.StringVar(value="")
+        self.current_artist_var = tk.StringVar(value="")
+        self.playback_info_var = tk.StringVar(value="准备就绪")
+        self.format_var = tk.StringVar(value="格式: 未知")
+        self.current_time_var = tk.StringVar(value="00:00")
+        self.total_time_var = tk.StringVar(value="00:00")
+        self.progress_var = tk.DoubleVar()
+        
+        saved_volume = self.config.get_volume()
+        volume_percent = int(saved_volume * 100) if saved_volume else 70
+        self.volume_var = tk.DoubleVar(value=volume_percent)
+        self.current_lyric_var = tk.StringVar(value="")
+        
+        saved_quality = self.config.get_quality()
+        quality_name = QUALITY_OPTIONS.get(saved_quality, "Hi-Res")
+        self.quality_var = tk.StringVar(value=quality_name)
+        
+        saved_play_mode = self.config.get_play_mode()
+        mode_name = PLAY_MODES.get(saved_play_mode, "顺序播放")
+        self.mode_var = tk.StringVar(value=mode_name)
+        
+        saved_spectrum_mode = self.config.get_spectrum_mode()
+        self.spectrum_mode_var = tk.StringVar(value=saved_spectrum_mode)
+        
+        saved_theme_key = self.config.get_theme()
+        saved_theme_name = self.theme_manager.theme_names.get(saved_theme_key, self.theme_manager.theme_names[DEFAULT_THEME])
+        self.theme_var = tk.StringVar(value=saved_theme_name)
+        
+        saved_source = self.config.get_source()
+        source_name = MUSIC_SOURCES.get(saved_source, "网易云音乐")
+        self.source_var = tk.StringVar(value=source_name)
+        self.search_var = tk.StringVar()
+        self.album_lyrics_panel = None
+        self.playback_service = None
+
         self.create_ui()
-        # 应用浅色主题
-        self.root.after(100, lambda: self.apply_theme("light"))
-        # 初始化完成后自动搜索热门歌曲
+        
+        theme_to_apply = saved_theme if saved_theme else "light"
+        self.root.after(100, lambda: self.apply_theme(theme_to_apply))
         self.root.after(1000, self.auto_search_hot_songs)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        self.logger.info("音乐播放器初始化完成")
 
     def clear_favorites(self):
         """清空收藏夹"""
@@ -105,7 +165,7 @@ class MusicPlayerGUI:
             self.favorites.clear()
             self.save_favorites()
             messagebox.showinfo("成功", "收藏夹已清空")
-            print("收藏夹已清空")
+            self.logger.info("收藏夹已清空")
 
     def show_favorites(self):
         """显示收藏夹"""
@@ -119,29 +179,110 @@ class MusicPlayerGUI:
         # 将收藏歌曲显示到播放列表
         self._update_playlist_with_tracks(self.favorites, "收藏夹")
 
-    def load_favorites(self):
+    def load_favorites(self) -> List[Dict[str, Any]]:
         """加载收藏列表"""
         try:
             if os.path.exists(self.favorites_file):
                 with open(self.favorites_file, 'r', encoding='utf-8') as f:
                     favorites_data = json.load(f)
-                    print(f"成功加载收藏列表，共 {len(favorites_data)} 首歌曲")
+                    self.logger.info(f"成功加载收藏列表，共 {len(favorites_data)} 首歌曲")
                     return favorites_data
             else:
-                print("收藏文件不存在，创建空列表")
+                self.logger.debug("收藏文件不存在，创建空列表")
                 return []
-        except Exception as e:
-            print(f"加载收藏列表失败: {e}")
+        except (IOError, OSError, json.JSONDecodeError) as e:
+            self.logger.error(f"加载收藏列表失败: {e}", exc_info=True)
             return []
 
-    def save_favorites(self):
+    def save_favorites(self) -> bool:
         """保存收藏列表"""
         try:
             with open(self.favorites_file, 'w', encoding='utf-8') as f:
                 json.dump(self.favorites, f, ensure_ascii=False, indent=2)
-            print(f"成功保存收藏列表，共 {len(self.favorites)} 首歌曲")
+            self.logger.info(f"成功保存收藏列表，共 {len(self.favorites)} 首歌曲")
+            return True
+        except (IOError, OSError) as e:
+            self.logger.error(f"保存收藏列表失败: {e}", exc_info=True)
+            return False
+    
+    def _on_window_resize(self, event):
+        """窗口大小变化处理"""
+        if event.widget != self.root:
+            return
+        
+        current_width = self.root.winfo_width()
+        current_height = self.root.winfo_height()
+        
+        if current_width != self._last_width or current_height != self._last_height:
+            self._last_width = current_width
+            self._last_height = current_height
+            
+            if hasattr(self, 'album_lyrics_panel') and self.album_lyrics_panel:
+                self.root.after(100, self._refresh_album_display)
+    
+    def _refresh_album_display(self):
+        """刷新专辑显示以适应新窗口大小"""
+        try:
+            if hasattr(self, 'album_lyrics_panel') and self.album_lyrics_panel:
+                if hasattr(self.album_lyrics_panel, '_set_default_album_display'):
+                    if self.current_track:
+                        self.album_lyrics_panel._set_default_album_display(self.current_track)
+                    else:
+                        self.album_lyrics_panel._set_default_album_display()
         except Exception as e:
-            print(f"保存收藏列表失败: {e}")
+            self.logger.error(f"刷新专辑显示失败: {e}", exc_info=True)
+    
+    def on_closing(self):
+        """窗口关闭时的处理"""
+        try:
+            # 保存当前所有配置
+            self.config.set_theme(self.theme_manager.current_theme, auto_save=False)
+            self.config.set_volume(self.player.volume, auto_save=False)
+            
+            # 保存音源（从中文名称转换为键）
+            source_name = self.source_var.get()
+            source_mapping = {v: k for k, v in MUSIC_SOURCES.items()}
+            source_key = source_mapping.get(source_name, "netease")
+            self.config.set_source(source_key, auto_save=False)
+            
+            # 保存音质（从中文名称转换为键）
+            quality_name = self.quality_var.get()
+            quality_mapping = {v: k for k, v in QUALITY_OPTIONS.items()}
+            quality_key = quality_mapping.get(quality_name, "999")
+            self.config.set_quality(quality_key, auto_save=False)
+            
+            # 保存播放模式（从中文名称转换为键）
+            mode_name = self.mode_var.get()
+            mode_mapping = {v: k for k, v in PLAY_MODES.items()}
+            mode_key = mode_mapping.get(mode_name, "order")
+            self.config.set_play_mode(mode_key, auto_save=False)
+            
+            # 保存搜索数量
+            try:
+                search_count = int(self.search_count_var.get())
+                self.config.set_search_count(search_count, auto_save=False)
+            except (ValueError, AttributeError, tk.TclError):
+                pass
+            
+            # 保存频谱模式
+            spectrum_mode = self.spectrum_mode_var.get()
+            self.config.set_spectrum_mode(spectrum_mode, auto_save=False)
+            
+            # 一次性保存所有配置
+            self.config.save_config()
+            self.logger.info("配置已保存")
+            
+            # 停止播放
+            self.player.stop()
+            
+            # 清理资源
+            self.player.cleanup()
+            
+            # 关闭窗口
+            self.root.destroy()
+        except Exception as e:
+            self.logger.error(f"关闭窗口时出错: {e}", exc_info=True)
+            self.root.destroy()
 
     def add_current_to_favorites(self):
         """添加当前歌曲到收藏"""
@@ -167,8 +308,12 @@ class MusicPlayerGUI:
         # 获取搜索数量
         try:
             count = int(self.search_count_var.get())
-        except:
-            count = 50  # 默认值
+            if count < 1 or count > 200:
+                self.logger.warning(f"搜索数量超出范围: {count}，使用默认值50")
+                count = 50
+        except (ValueError, AttributeError, tk.TclError) as e:
+            self.logger.error(f"解析搜索数量失败: {e}，使用默认值50")
+            count = 50
 
         # 在新线程中执行搜索
         threading.Thread(target=self._search_and_display_thread, args=(keyword, list_name, count), daemon=True).start()
@@ -178,21 +323,42 @@ class MusicPlayerGUI:
         try:
             result = self.api.search(keyword, source="网易云音乐", count=count)
 
-            if result and result.get("code") == 200 and "data" in result and result["data"]:
-                tracks = result["data"]
+            # 处理搜索结果
+            tracks = []
+            if isinstance(result, list):
+                # 直接返回列表的情况
+                tracks = result
+                self.logger.debug(f"收到列表格式结果，包含 {len(tracks)} 首歌曲")
+            elif isinstance(result, dict):
+                # 字典格式
+                if result.get("code") == 200:
+                    if "data" in result and result["data"]:
+                        tracks = result["data"] if isinstance(result["data"], list) else []
+                    else:
+                        self.logger.warning(f"搜索 '{keyword}' 返回成功但data为空")
+                else:
+                    error_msg = result.get("msg", "未知错误")
+                    self.logger.warning(f"搜索 '{keyword}' 失败: code={result.get('code')}, msg={error_msg}")
+            else:
+                self.logger.warning(f"搜索 '{keyword}' 返回了意外的格式: {type(result)}")
 
+            if tracks:
                 # 在主线程中更新播放列表
                 self.root.after(0, lambda: self._update_playlist_with_tracks(tracks, list_name))
             else:
-                self.root.after(0, lambda: self._show_playback_info(f"加载{list_name}失败"))
+                self.root.after(0, lambda: self._show_playback_info(f"加载{list_name}失败：未找到歌曲"))
 
         except Exception as e:
-            print(f"加载{list_name}失败: {e}")
+            self.logger.error(f"加载{list_name}失败: {e}", exc_info=True)
             self.root.after(0, lambda: self._show_playback_info(f"加载{list_name}失败"))
 
     def _update_playlist_with_tracks(self, tracks, list_name):
         """用指定歌曲更新播放列表"""
         try:
+            # 更新播放列表标题
+            if hasattr(self.left_panel, 'update_playlist_title'):
+                self.left_panel.update_playlist_title(list_name)
+            
             # 清空当前播放列表
             self.left_panel.clear_playlist_tree()
             self.playlist.clear()
@@ -204,20 +370,20 @@ class MusicPlayerGUI:
             # 显示成功信息
             song_count = len(tracks)
             self._show_playback_info(f"已加载 {song_count} 首{list_name}歌曲")
-            print(f"成功添加 {song_count} 首{list_name}歌曲到播放列表")
+            self.logger.info(f"成功添加 {song_count} 首{list_name}歌曲到播放列表")
         except Exception as e:
-            print(f"更新播放列表失败: {e}")
+            self.logger.error(f"更新播放列表失败: {e}", exc_info=True)
             self._show_playback_info("播放列表更新失败")
 
     def auto_search_hot_songs(self):
         """自动搜索热门歌曲并添加到播放列表"""
-        print("正在自动搜索热门歌曲...")
+        self.logger.info("正在自动搜索热门歌曲...")
         self._show_playback_info("正在加载热门歌曲...")
 
         # 在新线程中执行搜索
         threading.Thread(target=self._auto_search_thread, daemon=True).start()
 
-    def _auto_search_thread(self,count =100):
+    def _auto_search_thread(self,count =50):
         """自动搜索线程"""
         try:
             # 使用多个热门关键词来获取更多歌曲
@@ -227,39 +393,61 @@ class MusicPlayerGUI:
 
             for keyword in hot_keywords:
                 try:
-                    print(f"搜索热门关键词: {keyword}")
-                    result = self.api.search(keyword, source="网易云音乐", count= count)
+                    self.logger.debug(f"搜索热门关键词: {keyword}")
+                    result = self.api.search(keyword, source="网易云音乐", count=count)
 
-                    if result and result.get("code") == 200 and "data" in result and result["data"]:
-                        tracks = result["data"]
-                        # 去重处理
+                    # 调试：记录返回结果类型
+                    self.logger.debug(f"搜索结果类型: {type(result)}, 内容: {str(result)[:200]}")
+
+                    # 处理搜索结果
+                    tracks = []
+                    if isinstance(result, list):
+                        # 直接返回列表的情况
+                        tracks = result
+                        self.logger.debug(f"收到列表格式结果，包含 {len(tracks)} 首歌曲")
+                    elif isinstance(result, dict):
+                        # 字典格式
+                        if result.get("code") == 200:
+                            if "data" in result and result["data"]:
+                                tracks = result["data"] if isinstance(result["data"], list) else []
+                            else:
+                                self.logger.warning(f"关键词 '{keyword}' 返回成功但data为空")
+                        else:
+                            error_msg = result.get("msg", "未知错误")
+                            self.logger.warning(f"关键词 '{keyword}' 搜索失败: code={result.get('code')}, msg={error_msg}")
+                    else:
+                        self.logger.warning(f"关键词 '{keyword}' 返回了意外的格式: {type(result)}")
+
+                    if tracks:
                         for track in tracks:
-                            track_id = track.get('id')
-                            if not any(t.get('id') == track_id for t in all_tracks):
-                                all_tracks.append(track)
+                            if isinstance(track, dict):
+                                track_id = track.get('id')
+                                if track_id and not any(t.get('id') == track_id for t in all_tracks):
+                                    all_tracks.append(track)
 
-                        print(f"关键词 '{keyword}' 找到 {len(tracks)} 首歌曲，去重后总数为 {len(all_tracks)}")
+                        self.logger.debug(f"关键词 '{keyword}' 找到 {len(tracks)} 首歌曲，去重后总数为 {len(all_tracks)}")
 
-                        # 如果已经收集到足够多的歌曲，就停止搜索
                         if len(all_tracks) >= count:
                             break
+                    else:
+                        self.logger.debug(f"关键词 '{keyword}' 未找到歌曲")
 
                     # 短暂延迟，避免请求过于频繁
                     import time
                     time.sleep(0.5)
 
                 except Exception as e:
-                    print(f"搜索关键词 '{keyword}' 时出错: {e}")
+                    self.logger.error(f"搜索关键词 '{keyword}' 时出错: {e}", exc_info=True)
                     continue
 
-            # 限制最多200首
-            final_tracks = all_tracks[:count]
+            # 限制最多100首
+            final_tracks = all_tracks[:100]
 
             # 在主线程中更新UI
             self.root.after(0, lambda: self._update_playlist_with_tracks(final_tracks, "热门"))
 
         except Exception as e:
-            print(f"自动搜索热门歌曲失败: {e}")
+            self.logger.error(f"自动搜索热门歌曲失败: {e}", exc_info=True)
             self.root.after(0, lambda: self._show_playback_info("热门歌曲加载失败"))
 
     def create_ui(self):
@@ -303,14 +491,29 @@ class MusicPlayerGUI:
         main_frame = tk.Frame(self.root, bg="#f8f9fa")
         main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
 
-        # 先初始化共享的变量
-        self.current_song_var = tk.StringVar(value="")
-        self.current_artist_var = tk.StringVar(value="")
-        self.playback_info_var = tk.StringVar(value="准备就绪")
-        self.format_var = tk.StringVar(value="格式: 未知")
-
-        # 顶部搜索栏
-        self.create_search_bar(main_frame)
+        # 初始化搜索UI模块
+        self.search_ui = SearchUI(
+            parent=main_frame,
+            theme_manager=self.theme_manager,
+            api=self.api,
+            logger=self.logger,
+            add_to_playlist_callback=self.add_to_playlist,
+            play_track_callback=self.play_track,
+            add_to_favorites_callback=self._add_to_favorites_from_search,
+            show_playback_info_callback=self._show_playback_info,
+            root=self.root,
+            on_theme_change_callback=self.on_theme_change,
+            on_spectrum_mode_change_callback=self.on_spectrum_mode_change
+        )
+        # 同步搜索数量变量
+        self.search_ui.search_count_var = self.search_count_var
+        self.search_ui.source_var = self.source_var
+        self.search_ui.search_var = self.search_var
+        self.search_ui.theme_var = self.theme_var
+        self.search_ui.spectrum_mode_var = self.spectrum_mode_var
+        
+        # 创建搜索栏
+        self.search_ui.create_search_bar(main_frame)
 
         # 内容区域 - 初始使用浅色背景
         content_frame = tk.Frame(main_frame, bg="#f8f9fa")
@@ -326,101 +529,65 @@ class MusicPlayerGUI:
         # 右侧专辑和歌词
         self.create_right_panel(paned_window)
 
-        # 底部控制栏
-        self.create_control_bar(main_frame)
+        # 初始化控制栏UI模块
+        self.control_bar_ui = ControlBarUI(
+            parent=main_frame,
+            theme_manager=self.theme_manager,
+            logger=self.logger,
+            on_volume_change_callback=self.on_volume_change,
+            on_progress_change_callback=self.on_progress_change,
+            toggle_play_callback=self.toggle_play,
+            stop_play_callback=self.stop_play,
+            previous_track_callback=self.previous_track,
+            next_track_callback=self.next_track,
+            add_current_to_favorites_callback=self.add_current_to_favorites,
+            on_theme_change_callback=self.on_theme_change,
+            on_spectrum_mode_change_callback=self.on_spectrum_mode_change
+        )
+        # 同步变量引用
+        self.control_bar_ui.current_song_var = self.current_song_var
+        self.control_bar_ui.current_artist_var = self.current_artist_var
+        self.control_bar_ui.playback_info_var = self.playback_info_var
+        self.control_bar_ui.format_var = self.format_var
+        self.control_bar_ui.current_time_var = self.current_time_var
+        self.control_bar_ui.total_time_var = self.total_time_var
+        self.control_bar_ui.progress_var = self.progress_var
+        self.control_bar_ui.volume_var = self.volume_var
+        self.control_bar_ui.current_lyric_var = self.current_lyric_var
+        self.control_bar_ui.quality_var = self.quality_var
+        self.control_bar_ui.mode_var = self.mode_var
+        
+        # 创建控制栏
+        self.control_bar_ui.create_control_bar(main_frame)
 
-    def create_search_bar(self, parent):
-        # 获取当前主题
-        current_theme = self.theme_manager.get_current_theme()
+        # 保存按钮引用以便后续使用
+        self.play_btn = self.control_bar_ui.play_btn
+        self.prev_btn = self.control_bar_ui.prev_btn
+        self.next_btn = self.control_bar_ui.next_btn
+        self.stop_btn = self.control_bar_ui.stop_btn
+        self.favorite_btn = self.control_bar_ui.favorite_btn
+        self.progress_bar = self.control_bar_ui.progress_bar
+        self.current_lyric_label = self.control_bar_ui.current_lyric_label
+        self.playback_canvas = self.control_bar_ui.playback_canvas
+        self.playback_text_id = self.control_bar_ui.playback_text_id
+        self.playback_animation_id = self.control_bar_ui.playback_animation_id
+        self.control_frame = self.control_bar_ui.control_frame
+        
+        # 初始化播放服务（需要在UI创建后，因为需要album_lyrics_panel）
+        self.playback_service = PlaybackService(
+            api=self.api,
+            player=self.player,
+            cache_manager=self.cache_manager,
+            lyrics_manager=self.lyrics_manager,
+            album_lyrics_panel=self.album_lyrics_panel,
+            logger=self.logger,
+            root=self.root,
+            on_position_update_callback=self.on_position_update,
+            on_playback_finished_callback=self.on_playback_finished,
+            update_ui_callback=self._update_ui_callback
+        )
 
-        search_frame = tk.Frame(parent, bg=current_theme["bg"])
-        search_frame.pack(fill=tk.X, pady=(0, 15))
-
-        # 搜索框容器 - 添加圆角效果
-        search_container = tk.Frame(search_frame, bg=current_theme["secondary_bg"], relief=tk.RAISED, bd=1)
-        search_container.pack(fill=tk.X, padx=10, pady=5)
-
-        # 搜索源选择
-        source_label = tk.Label(search_container, text="🎵 音乐源:", bg=current_theme["secondary_bg"],
-                                fg=current_theme["text"],
-                                font=("Microsoft YaHei", 10))
-        source_label.pack(side=tk.LEFT, padx=(15, 5), pady=8)
-
-        self.source_var = tk.StringVar(value="网易云音乐")
-        source_combo = ttk.Combobox(search_container, textvariable=self.source_var,
-                                    values=list(MUSIC_SOURCES.values()),
-                                    width=12, state="readonly")
-        source_combo.pack(side=tk.LEFT, padx=5, pady=8)
-
-        # 搜索数量选择
-        count_label = tk.Label(search_container, text="📊 数量:", bg=current_theme["secondary_bg"],
-                               fg=current_theme["text"],
-                               font=("Microsoft YaHei", 10))
-        count_label.pack(side=tk.LEFT, padx=(15, 5), pady=8)
-
-        self.search_count_var = tk.StringVar(value="50")  # 默认50首
-        count_combo = ttk.Combobox(search_container, textvariable=self.search_count_var,
-                                   values=["10", "20", "30", "50", "100"],
-                                   width=8, state="normal")
-        count_combo.pack(side=tk.LEFT, padx=5, pady=8)
-
-        # 搜索框
-        self.search_var = tk.StringVar()
-        search_entry = tk.Entry(search_container, textvariable=self.search_var,
-                                width=35, font=("Microsoft YaHei", 11),
-                                bg=current_theme["tertiary_bg"], fg=current_theme["text"],
-                                insertbackground=current_theme["text"],
-                                relief=tk.FLAT, bd=2)
-        search_entry.pack(side=tk.LEFT, padx=15, pady=8, fill=tk.X, expand=True)
-        search_entry.bind("<Return>", lambda e: self.search_music())
-
-        # 搜索按钮
-        search_btn = tk.Button(search_container, text="🔍 搜索", command=self.search_music,
-                               bg=current_theme["accent"], fg="white", font=("Microsoft YaHei", 10, "bold"),
-                               relief="flat", bd=0, padx=20, cursor="hand2")
-        search_btn.pack(side=tk.LEFT, padx=(10, 15), pady=8)
-
-        # 设置选项容器
-        options_frame = tk.Frame(search_frame, bg=current_theme["bg"])
-        options_frame.pack(fill=tk.X, padx=10, pady=5)
-
-        # 频谱显示（移动到搜索栏）
-        spectrum_frame = tk.Frame(options_frame, bg=current_theme["bg"])
-        spectrum_frame.pack(side=tk.LEFT, padx=10)
-
-        spectrum_label = tk.Label(spectrum_frame, text="📊 频谱:",
-                                  bg=current_theme["bg"], fg=current_theme["text"],
-                                  font=("Microsoft YaHei", 9))
-        spectrum_label.pack(side=tk.LEFT, padx=(20, 5))
-
-        self.spectrum_mode_var = tk.StringVar(value="圆形")
-        spectrum_combo = ttk.Combobox(spectrum_frame,
-                                      textvariable=self.spectrum_mode_var,
-                                      values=["条形", "圆形", "瀑布流"],
-                                      width=8, state="readonly")
-        spectrum_combo.pack(side=tk.LEFT, padx=5)
-        spectrum_combo.bind("<<ComboboxSelected>>", self.on_spectrum_mode_change)
-
-        # 主题切换（移动到搜索栏）
-        theme_frame = tk.Frame(options_frame, bg=current_theme["bg"])
-        theme_frame.pack(side=tk.LEFT, padx=10)
-
-        theme_label = tk.Label(theme_frame, text="🎨 主题:",
-                               bg=current_theme["bg"], fg=current_theme["text"],
-                               font=("Microsoft YaHei", 9))
-        theme_label.pack(side=tk.LEFT, padx=(20, 5))
-
-        self.theme_var = tk.StringVar(value=self.theme_manager.theme_names[DEFAULT_THEME])
-        theme_combo = ttk.Combobox(theme_frame,
-                                   textvariable=self.theme_var,
-                                   values=self.theme_manager.get_available_themes(),
-                                   width=8, state="readonly")
-        theme_combo.pack(side=tk.LEFT, padx=5)
-        theme_combo.bind("<<ComboboxSelected>>", self.on_theme_change)
-
-        # 搜索结果下拉框架（初始隐藏）
-        self.search_results_frame = tk.Frame(search_frame, bg=current_theme["secondary_bg"])
-        # 不立即pack，等搜索时再显示
+    # create_search_bar 方法已移至 SearchUI 模块
 
     def create_left_panel(self, paned_window):
         """创建左侧播放列表和搜索结果面板"""
@@ -438,279 +605,9 @@ class MusicPlayerGUI:
         # 创建专辑歌词面板
         self.album_lyrics_panel = AlbumLyricsPanel(right_frame, self.lyrics_manager, self.theme_manager)
 
-    def create_control_bar(self, parent):
-        # 获取当前主题
-        current_theme = self.theme_manager.get_current_theme()
+    # create_control_bar 方法已移至 ControlBarUI 模块
 
-        control_frame = tk.Frame(parent, bg=current_theme["secondary_bg"], height=150)
-        control_frame.pack(fill=tk.X, pady=5)
-        control_frame.pack_propagate(False)
-        self.control_frame = control_frame
-
-        # 顶部：播放信息和歌词显示
-        top_frame = tk.Frame(control_frame, bg=current_theme["secondary_bg"])
-        top_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
-        self.top_frame = top_frame
-
-        # 左侧：播放信息
-        info_frame = tk.Frame(top_frame, bg=current_theme["secondary_bg"])
-        info_frame.pack(side=tk.LEFT, fill=tk.Y)
-        self.info_frame = info_frame
-
-        # 当前播放歌曲信息
-        song_label = tk.Label(info_frame, textvariable=self.current_song_var,
-                              font=("Microsoft YaHei", 10, "bold"),
-                              bg=current_theme["secondary_bg"], fg=current_theme["text"],
-                              anchor="w", width=20)
-        song_label.pack(fill=tk.X, pady=(0, 2))
-        self.song_label = song_label
-
-        artist_label = tk.Label(info_frame, textvariable=self.current_artist_var,
-                                font=("Microsoft YaHei", 9),
-                                bg=current_theme["secondary_bg"], fg=current_theme["secondary_text"],
-                                anchor="w", width=20)
-        artist_label.pack(fill=tk.X)
-        self.artist_label = artist_label
-
-        # 中央：当前播放歌词显示
-        lyric_frame = tk.Frame(top_frame, bg=current_theme["secondary_bg"])
-        lyric_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=20)
-        self.lyric_frame = lyric_frame
-
-        self.current_lyric_var = tk.StringVar(value="")
-        self.current_lyric_label = tk.Label(lyric_frame,
-                                            textvariable=self.current_lyric_var,
-                                            font=("Microsoft YaHei", 16, "bold"),
-                                            bg=current_theme["secondary_bg"],
-                                            fg=current_theme["accent"],
-                                            wraplength=600,
-                                            justify=tk.CENTER,
-                                            anchor=tk.CENTER)
-        self.current_lyric_label.pack(expand=True, fill=tk.BOTH)
-
-        # 右侧：状态信息
-        status_frame = tk.Frame(top_frame, bg=current_theme["secondary_bg"])
-        status_frame.pack(side=tk.RIGHT, fill=tk.Y)
-        self.status_frame = status_frame
-
-        playback_info_frame = tk.Frame(status_frame, bg=current_theme["secondary_bg"], height=20)
-        playback_info_frame.pack(fill=tk.X)
-        playback_info_frame.pack_propagate(False)
-
-        # 创建Canvas用于滚动文本
-        playback_canvas = tk.Canvas(playback_info_frame,
-                                    bg=current_theme["secondary_bg"],
-                                    highlightthickness=0,
-                                    height=20)
-        playback_canvas.pack(fill=tk.X)
-        playback_info_frame.bind("<Configure>", self._on_playback_frame_configure)
-
-        # 在Canvas上创建文本
-        self.playback_text_id = playback_canvas.create_text(0, 10,
-                                                            text="",
-                                                            anchor="w",
-                                                            font=("Microsoft YaHei", 10),
-                                                            fill=current_theme["accent"])
-        self.playback_canvas = playback_canvas
-        self.playback_animation_id = None
-
-        self.playback_info_var.trace_add("write", self._update_playback_scroll_text)
-
-        format_label = tk.Label(status_frame, textvariable=self.format_var,
-                                font=("Microsoft YaHei", 9),
-                                bg=current_theme["secondary_bg"], fg=current_theme["secondary_text"],
-                                anchor="e", width=15)
-        format_label.pack(fill=tk.X, pady=(2, 0))
-        self.format_label = format_label
-
-        # 中间：进度条
-        progress_frame = tk.Frame(control_frame, bg=current_theme["secondary_bg"])
-        progress_frame.pack(fill=tk.X, padx=20, pady=5)
-
-        # 时间显示和进度条
-        time_progress_frame = tk.Frame(progress_frame, bg=current_theme["secondary_bg"])
-        time_progress_frame.pack(fill=tk.X)
-
-        # 当前时间
-        self.current_time_var = tk.StringVar(value="00:00")
-        current_time_label = tk.Label(time_progress_frame, textvariable=self.current_time_var,
-                                      font=("Microsoft YaHei", 9),
-                                      bg=current_theme["secondary_bg"], fg=current_theme["text"],
-                                      width=6)
-        current_time_label.pack(side=tk.LEFT)
-
-        # 进度条
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Scale(time_progress_frame, from_=0, to=100,
-                                      variable=self.progress_var, orient=tk.HORIZONTAL,
-                                      length=400)
-        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.progress_bar.bind("<ButtonRelease-1>", self.on_progress_change)
-
-        # 总时间
-        self.total_time_var = tk.StringVar(value="00:00")
-        total_time_label = tk.Label(time_progress_frame, textvariable=self.total_time_var,
-                                    font=("Microsoft YaHei", 9),
-                                    bg=current_theme["secondary_bg"], fg=current_theme["text"],
-                                    width=6)
-        total_time_label.pack(side=tk.RIGHT)
-
-        # 底部：控制按钮和设置控件
-        bottom_frame = tk.Frame(control_frame, bg=current_theme["secondary_bg"])
-        bottom_frame.pack(fill=tk.X, padx=20, pady=(5, 10))
-
-        # 控制按钮
-        button_frame = tk.Frame(bottom_frame, bg=current_theme["secondary_bg"])
-        button_frame.pack(side=tk.LEFT)
-
-        # 超紧凑版本
-        self.prev_btn = CircularButton(button_frame, "⏮", self.previous_track,
-                                       normal_bg=current_theme["button_bg"],
-                                       normal_fg=current_theme["text"],
-                                       hover_bg=current_theme["button_hover"],
-                                       hover_fg="white",
-                                       size=32, font_size=10)
-        self.prev_btn.pack(side=tk.LEFT, padx=3)
-
-        self.play_btn = CircularButton(button_frame, "⏵", self.toggle_play,
-                                       normal_bg=current_theme["accent"],
-                                       normal_fg="white",
-                                       hover_bg=current_theme["button_hover"],
-                                       hover_fg="white",
-                                       size=36, font_size=12)
-        self.play_btn.pack(side=tk.LEFT, padx=3)
-
-        self.next_btn = CircularButton(button_frame, "⏭", self.next_track,
-                                       normal_bg=current_theme["button_bg"],
-                                       normal_fg=current_theme["text"],
-                                       hover_bg=current_theme["button_hover"],
-                                       hover_fg="white",
-                                       size=32, font_size=10)
-        self.next_btn.pack(side=tk.LEFT, padx=3)
-
-        self.stop_btn = CircularButton(button_frame, "⏹", self.stop_play,
-                                       normal_bg=current_theme["button_bg"],
-                                       normal_fg=current_theme["text"],
-                                       hover_bg="#E74C3C",
-                                       hover_fg="white",
-                                       size=32, font_size=10)
-        self.stop_btn.pack(side=tk.LEFT, padx=3)
-
-        self.favorite_btn = CircularButton(button_frame, "    ❤️", self.add_current_to_favorites,
-                                           normal_bg=current_theme["accent"],
-                                           normal_fg="white",
-                                           hover_bg=current_theme["button_hover"],
-                                           hover_fg="white",
-                                           size=36, font_size=16)
-        self.favorite_btn.pack(side=tk.LEFT, padx=3)
-
-        # 右侧：设置控件（按照新顺序：音质 -> 模式 -> 频谱 -> 主题）
-        settings_frame = tk.Frame(bottom_frame, bg=current_theme["secondary_bg"])
-        settings_frame.pack(side=tk.RIGHT)
-
-        # 1. 音质选择
-        quality_frame = tk.Frame(settings_frame, bg=current_theme["secondary_bg"])
-        quality_frame.pack(side=tk.LEFT, padx=10)
-
-        quality_label = tk.Label(quality_frame, text="🎚️ 音质:",
-                                 bg=current_theme["secondary_bg"], fg=current_theme["text"],
-                                 font=("Microsoft YaHei", 9))
-        quality_label.pack(side=tk.LEFT)
-
-        self.quality_var = tk.StringVar(value="Hi-Res")
-        quality_combo = ttk.Combobox(quality_frame,
-                                     textvariable=self.quality_var,
-                                     values=list(QUALITY_OPTIONS.values()),
-                                     width=8, state="readonly")
-        quality_combo.pack(side=tk.LEFT, padx=5)
-
-        # 2. 播放模式
-        mode_frame = tk.Frame(settings_frame, bg=current_theme["secondary_bg"])
-        mode_frame.pack(side=tk.LEFT, padx=10)
-
-        mode_label = tk.Label(mode_frame, text="🔀 模式:",
-                              bg=current_theme["secondary_bg"], fg=current_theme["text"],
-                              font=("Microsoft YaHei", 9))
-        mode_label.pack(side=tk.LEFT)
-
-        self.mode_var = tk.StringVar(value="随机播放")
-        mode_combo = ttk.Combobox(mode_frame,
-                                  textvariable=self.mode_var,
-                                  values=list(PLAY_MODES.values()),
-                                  width=8, state="readonly")
-        mode_combo.pack(side=tk.LEFT, padx=5)
-
-        # 音量控制（放在最右侧）
-        volume_frame = tk.Frame(bottom_frame, bg=current_theme["secondary_bg"])
-        volume_frame.pack(side=tk.RIGHT, padx=10)
-
-        volume_label = tk.Label(volume_frame, text="🔊",
-                                bg=current_theme["secondary_bg"], fg=current_theme["text"],
-                                font=("Arial", 12))
-        volume_label.pack(side=tk.LEFT)
-
-        self.volume_var = tk.DoubleVar(value=70)
-        volume_scale = ttk.Scale(volume_frame, from_=0, to=100,
-                                 variable=self.volume_var, orient=tk.HORIZONTAL,
-                                 length=80)
-        volume_scale.pack(side=tk.LEFT, padx=5)
-        volume_scale.bind("<ButtonRelease-1>", self.on_volume_change)
-
-    def _update_playback_scroll_text(self, *args):
-        """更新滚动文本显示"""
-        text = self.playback_info_var.get()
-
-        # 取消之前的动画
-        if self.playback_animation_id:
-            self.playback_canvas.after_cancel(self.playback_animation_id)
-            self.playback_animation_id = None
-
-        # 更新文本
-        self.playback_canvas.itemconfig(self.playback_text_id, text=text)
-
-        # 检查文本是否需要滚动
-        self._check_and_start_scroll(text)
-
-    def _check_and_start_scroll(self, text):
-        """检查文本长度并启动滚动动画"""
-        # 获取文本宽度
-        text_bbox = self.playback_canvas.bbox(self.playback_text_id)
-        if not text_bbox:
-            return
-
-        text_width = text_bbox[2] - text_bbox[0]
-        canvas_width = self.playback_canvas.winfo_width()
-
-        # 如果文本宽度大于画布宽度，启动滚动
-        if text_width > canvas_width and canvas_width > 0:
-            self._start_text_scroll_animation(text_width, canvas_width)
-        else:
-            # 文本不需要滚动，居右显示
-            self.playback_canvas.coords(self.playback_text_id, canvas_width, 10)
-            self.playback_canvas.itemconfig(self.playback_text_id, anchor="e")
-
-    def _start_text_scroll_animation(self, text_width, canvas_width):
-        """启动文本滚动动画"""
-        start_x = canvas_width + 10  # 从右侧开始
-        end_x = -text_width - 10  # 滚动到左侧之外
-
-        def animate(position):
-            self.playback_canvas.coords(self.playback_text_id, position, 10)
-
-            if position > end_x:
-                # 继续滚动
-                self.playback_animation_id = self.playback_canvas.after(20, animate, position - 2)
-            else:
-                # 滚动完成，重置到右侧
-                self.playback_animation_id = self.playback_canvas.after(1000, lambda: animate(start_x))
-
-        # 开始动画
-        animate(start_x)
-
-    def _on_playback_frame_configure(self, event):
-        """当播放信息框架大小改变时重新检查滚动"""
-        text = self.playback_info_var.get()
-        self._check_and_start_scroll(text)
+    # 滚动文本相关方法已移至 ControlBarUI 模块
 
     def on_theme_change(self, event):
         """切换主题"""
@@ -719,10 +616,17 @@ class MusicPlayerGUI:
 
         if self.theme_manager.set_theme(theme_key):
             self.apply_theme(theme_key)
+            # 保存主题配置
+            self.config.set_theme(theme_key)
+            self.logger.info(f"主题已更改为: {theme_name_cn} ({theme_key})")
 
     def on_spectrum_mode_change(self, event):
         """切换频谱显示模式"""
         mode = self.spectrum_mode_var.get()
+
+        # 保存频谱模式配置
+        self.config.set_spectrum_mode(mode)
+        self.logger.info(f"频谱模式已更改为: {mode}")
 
         # 重新创建频谱
         self._create_spectrum_by_mode()
@@ -804,6 +708,41 @@ class MusicPlayerGUI:
     def _show_playback_info(self, info_text):
         """显示播放状态信息"""
         self.playback_info_var.set(info_text)
+    
+    def _add_to_favorites_from_search(self, track):
+        """从搜索UI添加歌曲到收藏"""
+        # 检查是否已经收藏
+        track_id = track.get('id')
+        if any(fav.get('id') == track_id for fav in self.favorites):
+            self._show_playback_info("该歌曲已在收藏夹中")
+            return
+
+        # 添加到收藏
+        self.favorites.append(track)
+        self.save_favorites()
+        self._show_playback_info(f"已收藏: {track.get('name', '未知歌曲')}")
+    
+    def _update_ui_callback(self, update_type, value):
+        """UI更新回调，用于PlaybackService"""
+        if update_type == 'info':
+            self._show_playback_info(value)
+        elif update_type == 'format':
+            self._show_format_info(value)
+        elif update_type == 'play_state':
+            if value:
+                self.play_btn.config(text="⏸")
+            else:
+                self.play_btn.config(text="⏵")
+    
+    def _update_song_info_callback(self, track):
+        """更新歌曲信息回调"""
+        artist_list = track.get('artist', [])
+        if isinstance(artist_list, list) and artist_list:
+            artist_str = ', '.join(artist_list)
+        else:
+            artist_str = '未知歌手'
+        self.current_song_var.set(track.get('name', '未知歌曲'))
+        self.current_artist_var.set(artist_str)
 
     def _show_format_info(self, format_info):
         """显示音频格式信息"""
@@ -822,18 +761,19 @@ class MusicPlayerGUI:
         if current_to != total_duration:
             self.progress_bar.configure(to=total_duration)
 
-        # 更新进度条
-        self.progress_var.set(position)
+        # 更新进度条（如果用户没有在拖动）
+        if not self._is_seeking:
+            self.progress_var.set(position)
 
-        # 更新时间显示
-        current_time = self.format_time(position)
-        total_time = self.format_time(total_duration)
+            # 更新时间显示
+            current_time = self.format_time(position)
+            total_time = self.format_time(total_duration)
 
-        self.current_time_var.set(current_time)
-        self.total_time_var.set(total_time)
+            self.current_time_var.set(current_time)
+            self.total_time_var.set(total_time)
 
-        # 更新歌词高亮
-        self.album_lyrics_panel.highlight_current_lyric(position, self.current_lyric_var)
+            # 更新歌词高亮
+            self.album_lyrics_panel.highlight_current_lyric(position, self.current_lyric_var)
 
         # 检查是否播放完成 - 添加容差
         if total_duration > 0 and position >= max(0, total_duration - 1.0):
@@ -850,13 +790,35 @@ class MusicPlayerGUI:
 
     def on_progress_change(self, event):
         """进度条拖动"""
-        position = self.progress_var.get()
-        self.player.seek(position)
+        try:
+            # 设置拖动标志，防止位置更新干扰
+            self._is_seeking = True
+            
+            position = self.progress_var.get()
+            
+            # 执行跳转
+            success = self.player.seek(position)
+            
+            if success:
+                self.logger.debug(f"跳转到位置: {position:.2f}秒")
+            else:
+                self.logger.warning(f"跳转失败: {position:.2f}秒")
+                # 如果跳转失败，恢复进度条位置
+                if hasattr(self.player, 'position'):
+                    self.progress_var.set(self.player.position)
+        except Exception as e:
+            self.logger.error(f"进度条拖动处理失败: {e}", exc_info=True)
+        finally:
+            # 延迟重置标志，确保seek操作完成
+            self.root.after(100, lambda: setattr(self, '_is_seeking', False))
 
     def on_volume_change(self, event):
         """音量调整"""
         volume = self.volume_var.get() / 100.0
         self.player.set_volume(volume)
+        # 保存音量配置
+        self.config.set_volume(volume)
+        self.logger.debug(f"音量已设置为: {volume:.2f}")
 
     def on_playback_finished(self):
         """播放完成回调"""
@@ -866,7 +828,7 @@ class MusicPlayerGUI:
 
         self._playback_finished_triggered = True
 
-        print("播放完成")
+        self.logger.info("播放完成")
         self.play_btn.config(text="⏵")
         self.progress_var.set(0)
         self.current_time_var.set("00:00")
@@ -956,7 +918,8 @@ class MusicPlayerGUI:
 
             return (x <= event.x_root <= x + width and
                     y <= event.y_root <= y + height)
-        except:
+        except (AttributeError, tk.TclError) as e:
+            self.logger.debug(f"检查事件位置失败: {e}")
             return False
 
     def _hide_search_results_dropdown(self):
@@ -967,8 +930,8 @@ class MusicPlayerGUI:
                 self.search_results_frame.unbind("<MouseWheel>")
                 self.root.unbind("<Button-1>")
                 self.search_results_frame.destroy()
-            except:
-                pass
+            except (AttributeError, tk.TclError) as e:
+                self.logger.debug(f"隐藏搜索结果下拉框时出错: {e}")
             self.search_results_frame = None
             self.search_results_visible = False
 
@@ -978,12 +941,15 @@ class MusicPlayerGUI:
             # 获取搜索数量
             try:
                 count = int(self.search_count_var.get())
-            except:
-                count = 50  # 默认值
+                if count < 1 or count > 200:
+                    count = 50
+            except (ValueError, AttributeError, tk.TclError) as e:
+                self.logger.error(f"解析搜索数量失败: {e}，使用默认值50")
+                count = 50
 
             result = self.api.search(keyword, source=source, count=count)
 
-            print(f"搜索结果: {result}")
+            self.logger.debug(f"搜索结果: {result}")
 
             # 修改判断条件
             if result and result.get("code") == 200 and "data" in result and result["data"]:
@@ -1301,140 +1267,58 @@ class MusicPlayerGUI:
     def _ensure_spectrum_exists(self):
         """确保频谱存在，如果不存在则重新创建"""
         if not hasattr(self.album_lyrics_panel, 'spectrum_bars') or not self.album_lyrics_panel.spectrum_bars:
-            print("频谱不存在，重新创建...")
+            self.logger.debug("频谱不存在，重新创建...")
             self._create_spectrum_by_mode()
 
     def play_track(self, track):
+        """播放指定曲目 - 使用PlaybackService"""
         try:
             # 先停止当前播放和动画
             self._playback_finished_triggered = False
-            self.player.stop()
-            self.set_play_state(False)  # 停止动画
-
-            self._clear_playlist_highlight()
-
-            # 清除之前的歌词高亮
-            if hasattr(self.album_lyrics_panel, 'clear_lyrics_highlight'):
-                self.album_lyrics_panel.clear_lyrics_highlight()
-
+            
+            # 更新当前曲目
             self.current_track = track
-            self._highlight_current_playlist_item(track)
 
-            # 更新当前播放信息
-            artist_list = track.get('artist', [])
-            if isinstance(artist_list, list) and artist_list:
-                artist_str = ', '.join(artist_list)
+            # 获取播放参数（将中文名称转换为API键）
+            source_name = self.source_var.get()
+            source_mapping = {v: k for k, v in MUSIC_SOURCES.items()}
+            source = source_mapping.get(source_name, "netease")
+            
+            quality_name = self.quality_var.get()
+            quality_mapping = {v: k for k, v in QUALITY_OPTIONS.items()}
+            quality = quality_mapping.get(quality_name, "999")
+
+            # 使用PlaybackService播放
+            if self.playback_service:
+                self.playback_service.play_track(
+                    track=track,
+                    source=source,
+                    quality=quality,
+                    clear_highlight_callback=self._clear_playlist_highlight,
+                    highlight_callback=self._highlight_current_playlist_item,
+                    set_play_state_callback=self.set_play_state,
+                    create_spectrum_callback=self._create_spectrum_by_mode,
+                    start_spectrum_animation_callback=self._start_spectrum_animation,
+                    update_song_info_callback=self._update_song_info_callback,
+                    current_track_ref=[self.current_track]  # 使用列表以便修改
+                )
             else:
-                artist_str = '未知歌手'
-
-            self.current_song_var.set(track.get('name', '未知歌曲'))
-            self.current_artist_var.set(artist_str)
-
-            # 设置默认专辑显示
-            if hasattr(self.album_lyrics_panel, '_set_default_album_display'):
-                self.root.after(0, lambda: self.album_lyrics_panel._set_default_album_display(track))
-
-            # 根据当前频谱模式创建频谱
-            self.root.after(0, self._create_spectrum_by_mode)
-
-            # 获取播放链接
-            source = self.source_var.get()
-            quality = self.quality_var.get()
-
-            def play_thread():
-                try:
-                    # 获取播放URL
-                    url_result = self.api.get_song_url(track['id'], source=source, quality=quality)
-                    print(f"URL获取结果: {url_result}")
-
-                    if url_result and 'url' in url_result:
-                        url = url_result['url']
-                        file_format = url_result.get('format', '未知')
-
-                        if not url or not url.startswith('http'):
-                            self.root.after(0, self.next_track)
-                            return
-
-                        # 显示格式信息
-                        quality_name = QUALITY_OPTIONS.get(quality, quality)
-                        format_info = f"{quality_name}({file_format})"
-                        self.root.after(0, lambda: self._show_format_info(format_info))
-
-                        print(f"开始加载音乐URL: {url}, 格式: {file_format}")
-
-                        # 显示加载状态
-                        self.root.after(0, lambda: self._show_playback_info("正在加载音频..."))
-
-                        # 加载并播放
-                        if self.player.load(url):
-                            # 显示加载成功信息
-                            status = self.player.get_status()
-                            backend = status.get('backend', '未知')
-                            final_format = status.get('format', '未知')
-
-                            load_info = f"加载成功 - {backend}"
-                            self.root.after(0, lambda: self._show_playback_info(load_info))
-
-                            # 开始播放
-                            if self.player.play():
-                                # 重要：在这里启动旋转和频谱动画，确保音乐真的在播放
-                                self.root.after(0, lambda: self.set_play_state(True))
-                                # 显示播放信息
-                                play_info = f"正在播放 {quality_name}"
-                                self.root.after(0, lambda: self._show_playback_info(play_info))
-                                self.root.after(0, lambda: self.play_btn.config(text="⏸"))
-
-                                print("音乐开始播放，启动专辑图旋转和频谱动画")
-                            else:
-                                self.root.after(0, lambda: messagebox.showerror("错误", "播放启动失败"))
-                                self.root.after(0, lambda: self._show_playback_info("播放失败"))
-                        else:
-                            error_msg = f"音乐加载失败，格式: {file_format}"
-                            self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
-                            self.root.after(0, lambda: self._show_playback_info("加载失败"))
-
-                    else:
-                        error_msg = url_result.get('msg', '无法获取播放链接') if url_result else '获取播放链接失败'
-                        self.root.after(0, lambda: messagebox.showerror("错误", f"获取播放链接失败: {error_msg}"))
-                        self.root.after(0, lambda: self._show_playback_info("获取链接失败"))
-
-                    # 获取专辑图片
-                    if 'pic_id' in track:
-                        try:
-                            pic_result = self.api.get_album_pic(track['pic_id'], source=source)
-                            if pic_result and 'url' in pic_result:
-                                # 使用新的专辑面板加载图片
-                                self.root.after(0, lambda: self.album_lyrics_panel.load_album_image(
-                                    pic_result['url'], track))
-                        except Exception as e:
-                            print(f"获取专辑图片失败: {e}")
-                    self._create_spectrum_by_mode()
-                    self._start_spectrum_animation()
-
-                    # 获取歌词
-                    lyric_id = track.get('lyric_id', track['id'])
-                    try:
-                        lyric_result = self.api.get_lyrics(lyric_id, source=source)
-                        if lyric_result:
-                            # 使用新的专辑面板更新歌词
-                            self.root.after(0, lambda: self.album_lyrics_panel.update_lyrics(lyric_result))
-                    except Exception as e:
-                        print(f"获取歌词失败: {e}")
-
-                except Exception as e:
-                    error_msg = f"播放失败: {str(e)}"
-                    print(error_msg)
-                    self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
-                    self.root.after(0, lambda: self._show_playback_info("播放异常"))
-
-            # 启动播放线程
-            threading.Thread(target=play_thread, daemon=True).start()
+                # 如果PlaybackService未初始化，使用旧方法（向后兼容）
+                self.logger.warning("PlaybackService未初始化，使用旧方法播放")
+                self._play_track_legacy(track)
 
         except Exception as e:
             error_msg = f"播放失败: {str(e)}"
-            print(error_msg)
+            self.logger.error(error_msg, exc_info=True)
             messagebox.showerror("错误", error_msg)
             self._show_playback_info("播放异常")
+    
+    def _play_track_legacy(self, track):
+        """旧版播放方法（向后兼容）"""
+        # 如果PlaybackService未初始化，记录错误并提示用户
+        self.logger.error("PlaybackService未初始化，无法播放")
+        self._show_playback_info("播放服务未初始化，请重启程序")
+        messagebox.showerror("错误", "播放服务未初始化，请重启程序")
 
     def _create_spectrum_by_mode(self):
         """根据当前模式创建频谱"""
@@ -1545,7 +1429,7 @@ class MusicPlayerGUI:
                              daemon=True).start()
 
         except Exception as e:
-            print(f"播放默认音频失败: {e}")
+            self.logger.error(f"播放默认音频失败: {e}", exc_info=True)
             self._show_playback_info("默认音频播放失败")
 
     def _play_default_audio_thread(self, audio_path, track_info):
@@ -1572,14 +1456,14 @@ class MusicPlayerGUI:
                     self.root.after(0, lambda: self.play_btn.config(text="⏸"))
                     self.root.after(0, lambda: self._show_playback_info("正在播放默认音频"))
 
-                    print("默认音频开始播放")
+                    self.logger.info("默认音频开始播放")
                 else:
                     self.root.after(0, lambda: self._show_playback_info("默认音频播放失败"))
             else:
                 self.root.after(0, lambda: self._show_playback_info("默认音频加载失败"))
 
         except Exception as e:
-            print(f"播放默认音频线程失败: {e}")
+            self.logger.error(f"播放默认音频线程失败: {e}", exc_info=True)
             self.root.after(0, lambda: self._show_playback_info("默认音频播放异常"))
 
     def _play_random_from_playlist(self):
@@ -1669,7 +1553,7 @@ class MusicPlayerGUI:
         # 检查是否已存在
         track_id = track.get('id')
         if any(t.get('id') == track_id for t in self.playlist):
-            print(f"歌曲已存在: {track.get('name')}")
+            self.logger.debug(f"歌曲已存在: {track.get('name')}")
             return
 
         self.playlist.append(track)
@@ -1715,7 +1599,7 @@ class MusicPlayerGUI:
 
     def set_play_state(self, is_playing):
         """设置播放状态，控制旋转和频谱"""
-        print(f"设置播放状态: {is_playing}")
+        self.logger.debug(f"设置播放状态: {is_playing}")
         try:
             if is_playing:
                 # 延迟一点启动，确保专辑图片已经加载
@@ -1724,11 +1608,11 @@ class MusicPlayerGUI:
                 # 立即停止
                 self._stop_animation()
         except Exception as e:
-            print(f"设置播放状态时出错: {e}")
+            self.logger.error(f"设置播放状态时出错: {e}", exc_info=True)
 
     def _delayed_start_animation(self):
         """延迟启动动画，确保专辑图片已准备好"""
-        print("延迟启动动画")
+        self.logger.debug("延迟启动动画")
         if hasattr(self.album_lyrics_panel, 'start_rotation'):
             self.album_lyrics_panel.start_rotation()
         if hasattr(self.album_lyrics_panel, 'update_spectrum'):
@@ -1736,7 +1620,7 @@ class MusicPlayerGUI:
 
     def _stop_animation(self):
         """停止动画"""
-        print("停止动画")
+        self.logger.debug("停止动画")
         if hasattr(self.album_lyrics_panel, 'stop_rotation'):
             self.album_lyrics_panel.stop_rotation()
         if (hasattr(self.album_lyrics_panel, 'spectrum_animation_id') and
@@ -1748,7 +1632,7 @@ class MusicPlayerGUI:
                     )
                     self.album_lyrics_panel.spectrum_animation_id = None
                 except Exception as e:
-                    print(f"停止频谱动画时出错: {e}")
+                    self.logger.error(f"停止频谱动画时出错: {e}", exc_info=True)
 
     def apply_theme(self, theme_name):
         """应用主题到所有UI组件"""
@@ -1777,13 +1661,24 @@ class MusicPlayerGUI:
             # 更新控制栏背景
             self._update_control_bar(theme)
 
+            # 更新控制栏UI的ttk样式
+            if hasattr(self, 'control_bar_ui'):
+                self.control_bar_ui.update_theme(theme)
+
+            # 更新搜索UI的ttk样式
+            if hasattr(self, 'search_ui'):
+                self.search_ui._update_combobox_styles()
+
+            # 更新ttk组件样式（Combobox和Scale）
+            self._update_ttk_styles(theme)
+
             # 强制刷新UI
             self.root.update_idletasks()
 
-            print(f"已切换到 {self.theme_manager.theme_names[theme_name]} 主题")
+            self.logger.info(f"已切换到 {self.theme_manager.theme_names[theme_name]} 主题")
 
         except Exception as e:
-            print(f"切换主题时出错: {e}")
+            self.logger.error(f"切换主题时出错: {e}", exc_info=True)
 
     def _update_control_bar(self, theme):
         """更新控制栏颜色"""
@@ -1804,8 +1699,8 @@ class MusicPlayerGUI:
                     frame = getattr(self, frame_name)
                     try:
                         frame.configure(bg=theme["secondary_bg"])
-                    except:
-                        pass
+                    except (AttributeError, tk.TclError) as e:
+                        self.logger.debug(f"更新框架背景失败: {e}")
 
             # 更新控制栏内的标签
             control_labels = [
@@ -1819,14 +1714,14 @@ class MusicPlayerGUI:
                     label = getattr(self, label_name)
                     try:
                         label.configure(bg=theme["secondary_bg"], fg=theme["text"])
-                    except:
-                        pass
+                    except (AttributeError, tk.TclError) as e:
+                        self.logger.debug(f"更新标签样式失败: {e}")
 
             # 特别更新歌词显示标签
             self._update_lyric_display(theme)
 
         except Exception as e:
-            print(f"更新控制栏时出错: {e}")
+            self.logger.error(f"更新控制栏时出错: {e}", exc_info=True)
 
     def _update_lyric_display(self, theme):
         """更新歌词显示组件的颜色"""
@@ -1839,7 +1734,7 @@ class MusicPlayerGUI:
                 )
 
         except Exception as e:
-            print(f"更新歌词显示时出错: {e}")
+            self.logger.error(f"更新歌词显示时出错: {e}", exc_info=True)
 
     def _apply_theme_to_widgets(self, theme):
         """应用主题到各个UI组件"""
@@ -1928,8 +1823,8 @@ class MusicPlayerGUI:
         try:
             for child in widget.winfo_children():
                 self._apply_theme_recursive(child, theme)
-        except:
-            pass
+        except (AttributeError, tk.TclError) as e:
+            self.logger.debug(f"递归应用主题失败: {e}")
 
     def _update_treeview_style(self, theme):
         """更新Treeview样式"""
@@ -1990,16 +1885,58 @@ class MusicPlayerGUI:
             self._update_canvas_backgrounds(theme)
 
         except Exception as e:
-            print(f"更新按钮样式时出错: {e}")
+            self.logger.error(f"更新按钮样式时出错: {e}", exc_info=True)
 
     def _update_canvas_backgrounds(self, theme):
         """更新Canvas组件的背景色"""
         try:
             # 更新所有圆形按钮的画布背景
-            buttons = [self.play_btn, self.prev_btn, self.next_btn, self.stop_btn]
+            buttons = [self.play_btn, self.prev_btn, self.next_btn, self.stop_btn, self.favorite_btn]
             for button in buttons:
                 if hasattr(button, 'canvas'):
                     button.canvas.configure(bg=theme["secondary_bg"])
         except Exception as e:
-            print(f"更新画布背景时出错: {e}")
+            self.logger.error(f"更新画布背景时出错: {e}", exc_info=True)
+    
+    def _update_ttk_styles(self, theme):
+        """更新所有ttk组件样式（Combobox和Scale）"""
+        try:
+            style = ttk.Style()
+            
+            # 更新Combobox样式
+            style.configure("TCombobox",
+                           fieldbackground=theme.get("tertiary_bg", theme["secondary_bg"]),
+                           background=theme.get("tertiary_bg", theme["secondary_bg"]),
+                           foreground=theme["text"],
+                           borderwidth=1,
+                           relief=tk.FLAT,
+                           padding=5)
+            style.map("TCombobox",
+                     fieldbackground=[("readonly", theme.get("tertiary_bg", theme["secondary_bg"]))],
+                     background=[("readonly", theme.get("tertiary_bg", theme["secondary_bg"]))],
+                     foreground=[("readonly", theme["text"])])
+            
+            # 更新Scale（进度条和音量滑块）样式
+            style.configure("TScale",
+                           background=theme["secondary_bg"],
+                           troughcolor=theme.get("progress_bg", theme["tertiary_bg"]),
+                           sliderthickness=12,
+                           sliderrelief=tk.FLAT,
+                           borderwidth=0)
+            style.map("TScale",
+                     background=[("active", theme["secondary_bg"])],
+                     troughcolor=[("active", theme.get("progress_bg", theme["tertiary_bg"]))])
+            
+            style.configure("Horizontal.TScale",
+                           background=theme["secondary_bg"],
+                           troughcolor=theme.get("progress_bg", theme["tertiary_bg"]),
+                           sliderthickness=10,
+                           sliderrelief=tk.FLAT,
+                           borderwidth=0)
+            style.map("Horizontal.TScale",
+                     background=[("active", theme["secondary_bg"])],
+                     troughcolor=[("active", theme.get("progress_bg", theme["tertiary_bg"]))])
+            
+        except Exception as e:
+            self.logger.error(f"更新ttk样式时出错: {e}", exc_info=True)
 

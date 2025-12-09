@@ -13,9 +13,8 @@ class AlbumLyricsPanel:
     def __init__(self, parent, lyrics_manager, theme_manager=None):
         self.parent = parent
         self.lyrics_manager = lyrics_manager
-        self.theme_manager = theme_manager  # 添加主题管理器参数
+        self.theme_manager = theme_manager
 
-        # 存储引用
         self.bg_image_ref = None
         self.album_image_ref = None
         self.song_text_ref = None
@@ -24,27 +23,19 @@ class AlbumLyricsPanel:
         self._last_highlighted_lyric = None
         self.current_lyrics = []
         self.track_info = None
-
-        # 歌词滚动相关
         self.all_lyrics_data = []
         self.current_highlight_index = -1
         self.display_start_index = 0
-
-        # 旋转相关属性
         self.is_rotating = False
         self.rotation_angle = 0
         self.rotation_speed = 1
         self.original_album_image = None
         self.rotation_job = None
-
-        # 频谱相关属性
         self.spectrum_bars = []
-        self.spectrum_data = [0.1, 0.3, 0.6, 0.8, 0.9, 0.7, 0.5, 0.3]  # 初始频谱数据
+        self.spectrum_data = [0.1, 0.3, 0.6, 0.8, 0.9, 0.7, 0.5, 0.3]
         self.spectrum_animation_id = None
 
-        # 如果没有主题管理器，使用默认主题
         if theme_manager is None:
-            # 默认主题系统（向后兼容）
             self.themes = {
                 "dark": {"bg": "#1a1a1a", "text": "white", "accent": "#3498DB", "secondary": "#bdc3c7"},
                 "light": {"bg": "#f8f9fa", "text": "#2c3e50", "accent": "#e74c3c", "secondary": "#7f8c8d"},
@@ -53,10 +44,9 @@ class AlbumLyricsPanel:
             }
             self.current_theme = "dark"
         else:
-            self.themes = None  # 使用主题管理器的主题
+            self.themes = None
             self.current_theme = "light"
 
-        # 创建UI
         self.create_panel()
         self.parent.after(100, lambda: self._set_default_album_display())
 
@@ -69,22 +59,14 @@ class AlbumLyricsPanel:
 
     def create_panel(self):
         """创建专辑和歌词面板"""
-        # 获取当前背景色
         current_theme = self.get_current_theme_colors()
         bg_color = current_theme["bg"]
-
-        # 创建专辑背景画布
         self.album_canvas = tk.Canvas(self.parent, bg=bg_color, highlightthickness=0)
         self.album_canvas.pack(fill=tk.BOTH, expand=True)
-
-        # 不需要任何框架，所有内容都直接在画布上绘制
         self.album_image_ref = None
         self.song_text_ref = None
         self.artist_text_ref = None
         self.lyric_text_refs = []
-
-        # 延迟创建频谱显示，确保画布已渲染
-        self.album_canvas.pack(fill=tk.BOTH, expand=True)
         self.parent.after(500, self.create_spectrum)
 
     def start_rotation(self):
@@ -597,8 +579,20 @@ class AlbumLyricsPanel:
     def update_lyrics(self, lyric_result):
         """更新歌词显示"""
         try:
-            self.lyrics_manager.parse_lrc(lyric_result.get('lyric', ''))
-            self.lyrics_manager.parse_translated_lrc(lyric_result.get('tlyric', ''))
+            self.clear_lyrics_display()
+            
+            # 检查是否有有效的歌词数据
+            lyric_text = lyric_result.get('lyric', '') if lyric_result else ''
+            tlyric_text = lyric_result.get('tlyric', '') if lyric_result else ''
+            
+            if not lyric_text and not tlyric_text:
+                print("无歌词内容")
+                self._draw_no_lyrics()
+                return
+            
+            # 解析新歌词
+            self.lyrics_manager.parse_lrc(lyric_text)
+            self.lyrics_manager.parse_translated_lrc(tlyric_text)
 
             # 存储所有歌词数据
             self.all_lyrics_data = []
@@ -611,7 +605,7 @@ class AlbumLyricsPanel:
             self.current_highlight_index = -1
             self.display_start_index = 0
 
-            # 更新歌词显示
+            # 更新歌词显示（确保在清除后绘制）
             self._draw_lyrics()
 
             lyrics_count = len(self.lyrics_manager.lyrics)
@@ -620,6 +614,11 @@ class AlbumLyricsPanel:
 
         except Exception as e:
             print(f"更新歌词失败: {e}")
+            import traceback
+            traceback.print_exc()
+            # 确保即使出错也清除旧数据
+            self._clear_lyrics()
+            self.all_lyrics_data = []
             self._draw_lyrics_error("歌词加载失败")
 
     def _draw_lyrics(self, theme=None):
@@ -707,6 +706,9 @@ class AlbumLyricsPanel:
 
     def _draw_no_lyrics(self, theme=None):
         """绘制无歌词提示"""
+        # 先清除之前的歌词
+        self._clear_lyrics()
+        
         if theme is None:
             theme = self.get_current_theme_colors()
 
@@ -823,9 +825,47 @@ class AlbumLyricsPanel:
 
     def _clear_lyrics(self):
         """清除画布上的歌词"""
-        for ref in self.lyric_text_refs:
-            self.album_canvas.delete(ref)
-        self.lyric_text_refs.clear()
+        try:
+            for ref in self.lyric_text_refs:
+                try:
+                    self.album_canvas.delete(ref)
+                except (tk.TclError, AttributeError):
+                    pass
+            self.lyric_text_refs.clear()
+        except Exception as e:
+            print(f"清除歌词时出错: {e}")
+        finally:
+            self.lyric_text_refs.clear()
+    
+    def clear_lyrics_display(self):
+        """完全清除歌词显示（包括数据和画布）"""
+        try:
+            self._clear_lyrics()
+            self.all_lyrics_data = []
+            self.current_highlight_index = -1
+            self.display_start_index = 0
+            self.current_lyrics = []
+            self._last_highlighted_lyric = None
+            
+            if hasattr(self, 'lyrics_manager') and self.lyrics_manager:
+                self.lyrics_manager.clear()
+            
+            if hasattr(self, 'album_canvas') and self.album_canvas:
+                try:
+                    canvas_items = self.album_canvas.find_all()
+                    for item in canvas_items:
+                        try:
+                            item_type = self.album_canvas.type(item)
+                            if item_type == 'text':
+                                tags = self.album_canvas.gettags(item)
+                                if 'lyric' in str(tags).lower() or len(tags) == 0:
+                                    self.album_canvas.delete(item)
+                        except:
+                            pass
+                except:
+                    pass
+        except Exception as e:
+            print(f"清除歌词显示失败: {e}")
 
     def _draw_lyrics_error(self, message, theme=None):
         """绘制歌词错误信息"""
@@ -851,10 +891,12 @@ class AlbumLyricsPanel:
         self.lyric_text_refs.append(error_ref)
 
     def clear_lyrics_highlight(self):
-        """清除歌词高亮"""
+        """清除歌词高亮（重新绘制但不高亮）"""
         self.current_highlight_index = -1
         self.display_start_index = 0
         if hasattr(self, 'all_lyrics_data') and self.all_lyrics_data:
+            # 清除画布上的歌词，然后重新绘制
+            self._clear_lyrics()
             self._draw_lyrics()
 
     def create_spectrum(self):
